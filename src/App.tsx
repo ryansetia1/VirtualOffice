@@ -152,7 +152,7 @@ export default function App() {
             {(['live', 'build', 'assets'] as AppTab[]).map((tab) => (
               <button
                 key={tab}
-                style={{ ...styles.tab, ...(activeTab === tab ? styles.tabActive : {}) }}
+                className={`app-tab${activeTab === tab ? ' active' : ''}`}
                 onClick={(e) => { setActiveTab(tab); (e.currentTarget as HTMLElement).blur(); }}
               >
                 {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -319,15 +319,7 @@ const styles: Record<string, React.CSSProperties> = {
   tabBarLeft: { display: 'flex', alignItems: 'center', gap: 16 },
   appTitle: { fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.3px' },
   tabs: { display: 'flex', gap: 2 },
-  tab: {
-    padding: '6px 16px', borderRadius: '4px 4px 0 0', background: 'transparent', fontSize: 12,
-    fontWeight: 500, cursor: 'pointer', color: 'var(--text-muted)',
-    borderTop: 'none', borderLeft: 'none', borderRight: 'none',
-    borderBottom: '2px solid transparent',
-    outline: 'none',
-    transition: 'color 0.15s, border-color 0.15s, background 0.15s',
-  },
-  tabActive: { color: 'var(--accent)', borderBottomColor: 'var(--accent)', background: 'var(--accent-dim)' },
+  // tab styles are in index.css (.app-tab / .app-tab.active)
   body: { flex: 1, display: 'flex', overflow: 'hidden' },
   loadingScreen: { height: '100%', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-primary)' },
   loadingContent: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 },

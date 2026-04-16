@@ -117,6 +117,40 @@ input, select {
   color: inherit;
 }
 
+.app-tab {
+  padding: 6px 16px;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text-muted);
+  border: none !important;
+  border-bottom: 2px solid transparent !important;
+  outline: none !important;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.app-tab:hover,
+.app-tab:focus,
+.app-tab:active,
+.app-tab:focus-visible {
+  border: none !important;
+  border-bottom: 2px solid transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+.app-tab.active {
+  color: var(--accent) !important;
+  border-bottom: 2px solid var(--accent) !important;
+  background: var(--accent-dim) !important;
+}
+.app-tab.active:hover,
+.app-tab.active:focus,
+.app-tab.active:active {
+  border-bottom: 2px solid var(--accent) !important;
+}
+
 /* Only allow selection highlight in input fields */
 input::selection,
 textarea::selection {
