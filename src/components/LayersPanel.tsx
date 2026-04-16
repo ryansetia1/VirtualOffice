@@ -100,6 +100,11 @@ export default function LayersPanel({
   const layerHeaderRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const groupHeaderRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
+  // Panel resize state
+  const [panelWidth, setPanelWidth] = useState(220);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
   const toggleLayerCollapsed = useCallback((layer: string) => {
     setLayerCollapsed((prev) => ({ ...prev, [layer]: !prev[layer] }));
   }, []);
@@ -474,6 +479,38 @@ export default function LayersPanel({
     setDropTargetGroupId(null);
   }, [dragIds, dragGroupId, isDragActive, dropTargetLayer, dropTargetGroupId, insertTargetId, insertAbove, insertGroupTargetId, insertGroupAbove, room.placements, room.groups, onMovePlacementsToLayer, onReorderPlacementsBulk, onMoveGroupToLayer, onReorderGroups, onAddPlacementsToGroup]);
 
+  // ── Panel resize handlers ──────────────────────────────────────────────
+  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsResizing(true);
+    resizeStartRef.current = { startX: e.clientX, startWidth: panelWidth };
+    document.body.style.cursor = 'ew-resize';
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, [panelWidth]);
+
+  const handleResizeMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isResizing || !resizeStartRef.current) return;
+    const dx = e.clientX - resizeStartRef.current.startX;
+    const newWidth = Math.max(180, Math.min(600, resizeStartRef.current.startWidth + dx));
+    setPanelWidth(newWidth);
+  }, [isResizing]);
+
+  const handleResizeEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    setIsResizing(false);
+    resizeStartRef.current = null;
+    document.body.style.cursor = '';
+  }, []);
+
+  // Horizontal scroll with trackpad
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (!scrollRef.current) return;
+    const { deltaX, deltaY } = e;
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+      e.preventDefault();
+      scrollRef.current.scrollLeft += deltaX;
+    }
+  }, []);
+
   // ── Collapsed view ─────────────────────────────────────────────────────
   if (panelCollapsed) {
     return (
@@ -598,9 +635,10 @@ export default function LayersPanel({
 
   return (
     <div
-      style={styles.container}
+      style={{ ...styles.container, width: panelWidth, minWidth: panelWidth }}
       onPointerMove={handleDragPointerMove}
       onPointerUp={handleDragPointerUp}
+      onWheel={handleWheel}
     >
       <div style={styles.header}>
         <span style={styles.title}>Layers</span>
@@ -710,6 +748,14 @@ export default function LayersPanel({
         }} />
       )}
 
+      {/* Resize handle */}
+      <div
+        style={styles.resizeHandle}
+        onPointerDown={handleResizeStart}
+        onPointerMove={isResizing ? handleResizeMove : undefined}
+        onPointerUp={isResizing ? handleResizeEnd : undefined}
+      />
+
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}
@@ -724,7 +770,7 @@ export default function LayersPanel({
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
-    width: 220, minWidth: 220, background: 'var(--bg-secondary)',
+    background: 'var(--bg-secondary)',
     borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column',
     height: '100%', userSelect: 'none', position: 'relative',
   },
@@ -746,12 +792,28 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 12,
     cursor: 'pointer', padding: '2px 4px', borderRadius: 3,
   },
-  scrollArea: { flex: 1, overflowY: 'auto' },
+  scrollArea: { 
+    flex: 1, 
+    overflowY: 'auto', 
+    overflowX: 'auto',
+    minWidth: 0,
+  },
+  resizeHandle: {
+    position: 'absolute',
+    top: 0,
+    right: -3,
+    width: 6,
+    height: '100%',
+    cursor: 'ew-resize',
+    background: 'transparent',
+    zIndex: 10,
+  },
 
   layerGroup: { borderBottom: '1px solid var(--border)' },
   layerHeader: {
     display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px',
     cursor: 'pointer', background: 'var(--bg-surface)', fontSize: 12,
+    minWidth: 'fit-content',
   },
   layerHeaderActive: {
     background: 'var(--accent-dim)',
@@ -771,8 +833,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 0, flexShrink: 0, lineHeight: 1,
   },
   layerName: {
-    flex: 1, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden',
-    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    flex: 1, fontWeight: 500, color: 'var(--text-primary)',
+    whiteSpace: 'nowrap', minWidth: 0,
   },
   layerCount: {
     fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace', flexShrink: 0,
@@ -786,6 +848,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', gap: 4, padding: '4px 8px 4px 20px',
     cursor: 'pointer', fontSize: 11, background: 'var(--bg-primary)',
     borderTop: '1px solid var(--border)', touchAction: 'none',
+    minWidth: 'fit-content',
   },
   groupHeaderSelected: {
     background: 'rgba(79, 195, 247, 0.2)',
@@ -798,15 +861,15 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--accent-dim)',
   },
   groupName: {
-    flex: 1, fontWeight: 500, color: 'var(--text-secondary)', overflow: 'hidden',
-    textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: 'italic',
+    flex: 1, fontWeight: 500, color: 'var(--text-secondary)',
+    whiteSpace: 'nowrap', fontStyle: 'italic', minWidth: 0,
   },
 
   itemList: { padding: '1px 0' },
   placementItem: {
     display: 'flex', alignItems: 'center', padding: '3px 8px 3px 32px',
     cursor: 'pointer', fontSize: 11, color: 'var(--text-secondary)',
-    touchAction: 'none',
+    touchAction: 'none', minWidth: 'fit-content',
   },
   placementItemInGroup: {
     paddingLeft: 44,
@@ -818,6 +881,6 @@ const styles: Record<string, React.CSSProperties> = {
     opacity: 0.4,
   },
   placementName: {
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+    whiteSpace: 'nowrap', flex: 1, minWidth: 0,
   },
 };
