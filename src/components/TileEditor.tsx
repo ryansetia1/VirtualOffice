@@ -48,7 +48,17 @@ export default function TileEditor({ assetId, tileOverrides, onSave, onReset, on
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = false;
 
-    // Draw scaled image
+    // Draw checkerboard pattern behind the image (Photoshop-style transparency)
+    const checkerSize = 8;
+    for (let y = 0; y < canvas.height; y += checkerSize) {
+      for (let x = 0; x < canvas.width; x += checkerSize) {
+        const isLight = ((x / checkerSize) + (y / checkerSize)) % 2 === 0;
+        ctx.fillStyle = isLight ? '#3a3a3a' : '#2a2a2a';
+        ctx.fillRect(x, y, checkerSize, checkerSize);
+      }
+    }
+
+    // Draw scaled image on top of checkerboard
     ctx.drawImage(img, 0, 0, COLS * CELL, ROWS * CELL);
 
     // Overlay grid

@@ -5,6 +5,18 @@ import { getCachedImage } from '../utils/imageLoader';
 const IMG_COLS = 2;
 const IMG_ROWS = 3;
 
+const CHECKER_BG: React.CSSProperties = {
+  backgroundImage:
+    'linear-gradient(45deg, #2a2a2a 25%, transparent 25%), ' +
+    'linear-gradient(-45deg, #2a2a2a 25%, transparent 25%), ' +
+    'linear-gradient(45deg, transparent 75%, #2a2a2a 75%), ' +
+    'linear-gradient(-45deg, transparent 75%, #2a2a2a 75%)',
+  backgroundSize: '8px 8px',
+  backgroundPosition: '0 0, 0 4px, 4px -4px, -4px 0',
+  backgroundColor: '#3a3a3a',
+  borderRadius: 3,
+};
+
 interface Props {
   assetId: number;
   path: string;
@@ -37,27 +49,27 @@ export default function AssetThumbnail({ assetId, path, tileOverrides, size }: P
       );
     }
     return (
-      <img
-        src={cachedImg.src}
-        alt={`#${assetId}`}
-        draggable={false}
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'contain',
-          imageRendering: 'pixelated',
-        }}
-      />
+      <div style={{ width: '100%', height: '100%', ...CHECKER_BG, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <img
+          src={cachedImg.src}
+          alt={`#${assetId}`}
+          draggable={false}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'contain',
+            imageRendering: 'pixelated',
+          }}
+        />
+      </div>
     );
   }
 
-  // For built-in assets: crop to occupied region with proper aspect ratio, no wasted space
-  // Wrapper takes the aspect ratio of the cropped region and fills as much of the
-  // parent cell as possible. The full sprite image is then scaled & positioned inside
-  // so only the occupied tiles are visible.
+  // Outer container fills the entire cell with checkerboard background.
+  // Inner crop div maintains asset aspect ratio and is centered.
   const isTall = info.spanH > info.spanW;
 
-  const wrapStyle: React.CSSProperties = {
+  const cropStyle: React.CSSProperties = {
     position: 'relative',
     overflow: 'hidden',
     aspectRatio: `${info.spanW} / ${info.spanH}`,
@@ -77,8 +89,10 @@ export default function AssetThumbnail({ assetId, path, tileOverrides, size }: P
   };
 
   return (
-    <div style={wrapStyle}>
-      <img src={path} alt={`#${assetId}`} draggable={false} style={imgStyle} />
+    <div style={{ width: '100%', height: '100%', ...CHECKER_BG, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={cropStyle}>
+        <img src={path} alt={`#${assetId}`} draggable={false} style={imgStyle} />
+      </div>
     </div>
   );
 }
