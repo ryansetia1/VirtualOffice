@@ -7,8 +7,8 @@ const LAYER_COLORS: Record<string, string> = {
   object: '#4a7a6b',
 };
 
-const MAP_MAX_W = 160;
-const MAP_MAX_H = 120;
+const MAP_W = 160;
+const MAP_H = 120;
 // Show area beyond workspace - 2x the workspace size in each direction
 const MAP_PADDING_FACTOR = 1.5;
 const MIN_ZOOM = 0.2;
@@ -44,17 +44,13 @@ export default function ZoomNavigator({
   const expandedW = room.width * MAP_PADDING_FACTOR;
   const expandedH = room.height * MAP_PADDING_FACTOR;
   
-  // Calculate minimap size based on expanded area
-  const expandedAspect = expandedW / expandedH;
-  const mapW = expandedAspect >= MAP_MAX_W / MAP_MAX_H
-    ? MAP_MAX_W
-    : Math.round(MAP_MAX_H * expandedAspect);
-  const mapH = expandedAspect >= MAP_MAX_W / MAP_MAX_H
-    ? Math.round(MAP_MAX_W / expandedAspect)
-    : MAP_MAX_H;
+  // Use fixed minimap size
+  const mapW = MAP_W;
+  const mapH = MAP_H;
 
   // Scale converts from expanded area tiles to minimap pixels
-  const tileToMapScale = mapW / expandedW;
+  // Use the smaller scale to fit entire expanded area within the fixed map size
+  const tileToMapScale = Math.min(mapW / expandedW, mapH / expandedH);
   
   // Workspace position in expanded area (centered)
   const workspaceOffsetTiles = {
@@ -71,9 +67,15 @@ export default function ZoomNavigator({
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       
+      // Calculate center offset (same as in render)
+      const scaledExpandedW = expandedW * tileToMapScale;
+      const scaledExpandedH = expandedH * tileToMapScale;
+      const centerOffsetX = (mapW - scaledExpandedW) / 2;
+      const centerOffsetY = (mapH - scaledExpandedH) / 2;
+      
       // Convert click position from minimap pixels to expanded area tiles
-      const mapX = clientX - rect.left;
-      const mapY = clientY - rect.top;
+      const mapX = clientX - rect.left - centerOffsetX;
+      const mapY = clientY - rect.top - centerOffsetY;
       const expandedTileX = mapX / tileToMapScale;
       const expandedTileY = mapY / tileToMapScale;
       
@@ -90,7 +92,7 @@ export default function ZoomNavigator({
         y: -(workspacePixelY - containerHeight / 2),
       });
     },
-    [tileToMapScale, workspaceOffsetTiles, room.cellSize, zoom, containerWidth, containerHeight, onOffsetChange]
+    [expandedW, expandedH, mapW, mapH, tileToMapScale, workspaceOffsetTiles, room.cellSize, zoom, containerWidth, containerHeight, onOffsetChange]
   );
 
   useEffect(() => {
@@ -110,9 +112,15 @@ export default function ZoomNavigator({
     ctx.fillStyle = '#1c2833';
     ctx.fillRect(0, 0, mapW, mapH);
 
+    // Center the expanded area within the fixed canvas size
+    const scaledExpandedW = expandedW * tileToMapScale;
+    const scaledExpandedH = expandedH * tileToMapScale;
+    const centerOffsetX = (mapW - scaledExpandedW) / 2;
+    const centerOffsetY = (mapH - scaledExpandedH) / 2;
+
     // Calculate workspace area position in minimap
-    const workspaceMapX = workspaceOffsetTiles.x * tileToMapScale;
-    const workspaceMapY = workspaceOffsetTiles.y * tileToMapScale;
+    const workspaceMapX = centerOffsetX + workspaceOffsetTiles.x * tileToMapScale;
+    const workspaceMapY = centerOffsetY + workspaceOffsetTiles.y * tileToMapScale;
     const workspaceMapW = room.width * tileToMapScale;
     const workspaceMapH = room.height * tileToMapScale;
 
@@ -178,7 +186,7 @@ export default function ZoomNavigator({
     ctx.strokeStyle = 'rgba(79, 195, 247, 0.8)';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(vpMapX, vpMapY, vpMapW, vpMapH);
-  }, [room, zoom, offset, containerWidth, containerHeight, cellPx, mapW, mapH, tileToMapScale, workspaceOffsetTiles]);
+  }, [room, zoom, offset, containerWidth, containerHeight, cellPx, mapW, mapH, tileToMapScale, workspaceOffsetTiles, expandedW, expandedH]);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -271,6 +279,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--bg-secondary)',
     border: '1px solid var(--border)',
     boxShadow: '0 2px 12px rgba(0,0,0,0.4)',
+    width: 160,
   },
   btn: {
     padding: '2px 8px',

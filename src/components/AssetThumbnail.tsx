@@ -51,30 +51,28 @@ export default function AssetThumbnail({ assetId, path, tileOverrides, size }: P
     );
   }
 
-  // For built-in assets: CSS-crop to show only the occupied bounding box
-  // Image is IMG_COLS × IMG_ROWS tiles (96×144). We want to show the sub-rect
-  // from (srcCol, srcRow) with size (spanW, spanH) in tile units.
-  const imgWidthPct = (IMG_COLS / info.spanW) * 100;
-  const imgHeightPct = (IMG_ROWS / info.spanH) * 100;
-  const leftPct = (info.srcCol / info.spanW) * 100;
-  const topPct = (info.srcRow / info.spanH) * 100;
+  // For built-in assets: crop to occupied region with proper aspect ratio, no wasted space
+  // Wrapper takes the aspect ratio of the cropped region and fills as much of the
+  // parent cell as possible. The full sprite image is then scaled & positioned inside
+  // so only the occupied tiles are visible.
+  const isTall = info.spanH > info.spanW;
 
   const wrapStyle: React.CSSProperties = {
-    width: '100%',
-    height: '100%',
-    overflow: 'hidden',
     position: 'relative',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    overflow: 'hidden',
+    aspectRatio: `${info.spanW} / ${info.spanH}`,
+    width: isTall ? 'auto' : '100%',
+    height: isTall ? '100%' : 'auto',
+    maxWidth: '100%',
+    maxHeight: '100%',
   };
 
   const imgStyle: React.CSSProperties = {
     position: 'absolute',
-    width: `${imgWidthPct}%`,
-    height: `${imgHeightPct}%`,
-    left: `-${leftPct}%`,
-    top: `-${topPct}%`,
+    width: `${(IMG_COLS / info.spanW) * 100}%`,
+    height: `${(IMG_ROWS / info.spanH) * 100}%`,
+    left: `${-(info.srcCol / info.spanW) * 100}%`,
+    top: `${-(info.srcRow / info.spanH) * 100}%`,
     imageRendering: 'pixelated',
   };
 

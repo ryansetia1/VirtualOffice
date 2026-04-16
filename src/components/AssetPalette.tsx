@@ -237,7 +237,17 @@ const styles: Record<string, React.CSSProperties> = {
   chevron: { fontSize: 10, color: 'var(--text-muted)', width: 12 },
   count: { marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' },
   grid: { display: 'grid', gap: 4, padding: 8, background: 'var(--bg-primary)' },
-  tile: { aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, cursor: 'grab', background: 'transparent', overflow: 'hidden', position: 'relative' as const },
+  tile: { 
+    aspectRatio: '1',
+    display: 'flex', 
+    alignItems: 'center', 
+    justifyContent: 'center', 
+    borderRadius: 4, 
+    cursor: 'grab', 
+    background: 'transparent', 
+    overflow: 'hidden',
+    position: 'relative' as const,
+  },
   tileSelected: { background: 'var(--accent-dim)' },
   selectionOverlay: { position: 'absolute' as const, inset: 0, borderRadius: 4, border: '2px solid var(--accent)', pointerEvents: 'none' as const, zIndex: 1 },
 };

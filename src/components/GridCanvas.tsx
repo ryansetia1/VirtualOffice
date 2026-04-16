@@ -968,17 +968,15 @@ export default function GridCanvas({
           Drag from Assets
         </div>
       )}
-      {!readOnly && (
-        <ZoomNavigator
-          room={room}
-          zoom={zoom}
-          offset={offset}
-          containerWidth={containerSize.w}
-          containerHeight={containerSize.h}
-          onZoomChange={onZoomChange}
-          onOffsetChange={setOffset}
-        />
-      )}
+      <ZoomNavigator
+        room={room}
+        zoom={zoom}
+        offset={offset}
+        containerWidth={containerSize.w}
+        containerHeight={containerSize.h}
+        onZoomChange={onZoomChange}
+        onOffsetChange={setOffset}
+      />
     </div>
   );
 }
