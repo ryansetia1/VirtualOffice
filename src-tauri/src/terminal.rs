@@ -60,8 +60,12 @@ pub fn pty_spawn(
     on_message: Channel<PtyMsg>,
 ) -> Result<(), String> {
     let mut map = SESSIONS.lock().map_err(|e| e.to_string())?;
-    if map.contains_key(&session_id) {
-        return Err(format!("session '{}' already exists", session_id));
+    // If a session with the same ID is still around (e.g. React StrictMode's
+    // double-invoke pattern in dev) kill it first and replace transparently,
+    // so the UI side never has to special-case this race.
+    if let Some(mut old) = map.remove(&session_id) {
+        let _ = old.child.kill();
+        let _ = old.writer.flush();
     }
 
     let pty_system = native_pty_system();

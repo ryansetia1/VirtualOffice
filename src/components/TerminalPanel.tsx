@@ -85,9 +85,9 @@ function TerminalView({ agent, active, onAutoClose }: { agent: Agent; active: bo
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const spawnedRef = useRef(false);
   const sessionId = `agent:${agent.id}`;
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string>('booting…');
 
   const fit = useCallback(() => {
     const fitAddon = fitRef.current;
@@ -103,32 +103,25 @@ function TerminalView({ agent, active, onAutoClose }: { agent: Agent; active: bo
 
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || spawnedRef.current) return;
-    spawnedRef.current = true;
+    if (!el) return;
 
-    let disposed = false;
-    let closeChannel: (() => void) | null = null;
-    let ro: ResizeObserver | null = null;
-    let term: Terminal | null = null;
-
-    // Wait for the host element to have layout (width/height > 0) before
-    // opening xterm & spawning the PTY. Without this, FitAddon can return
-    // 0x0 dimensions and the shell never paints a prompt.
-    const waitForLayout = () => new Promise<void>((resolve) => {
-      const check = () => {
-        if (disposed) return resolve();
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) return resolve();
-        requestAnimationFrame(check);
-      };
-      check();
-    });
+    // `state` lives through the whole effect closure so the cleanup
+    // function can dispose whatever was already created even if the
+    // async init didn't finish yet (e.g. React StrictMode's mount →
+    // cleanup → remount cycle in dev). The async block below writes
+    // to state.term / state.closeChannel / state.ro as soon as each
+    // resource exists, and cleanup reads from `state` — so nothing
+    // leaks whether cleanup fires before, during, or after init.
+    const state: {
+      disposed: boolean;
+      term: Terminal | null;
+      closeChannel: (() => void) | null;
+      ro: ResizeObserver | null;
+    } = { disposed: false, term: null, closeChannel: null, ro: null };
 
     (async () => {
+      let term: Terminal;
       try {
-        await waitForLayout();
-        if (disposed) return;
-
         term = new Terminal({
           fontSize: 13,
           fontFamily: 'Menlo, Monaco, "Courier New", monospace',
@@ -145,61 +138,98 @@ function TerminalView({ agent, active, onAutoClose }: { agent: Agent; active: bo
         const fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
         term.open(el);
+
+        state.term = term;
         termRef.current = term;
         fitRef.current = fitAddon;
 
-        try { fitAddon.fit(); } catch { /* ignore */ }
+        if (state.disposed) { term.dispose(); return; }
 
-        // Guard against degenerate sizes.
+        term.write('\x1b[90m[terminal opened]\x1b[0m\r\n');
+        try { fitAddon.fit(); } catch (e) { console.warn('[terminal] fit failed (non-fatal)', e); }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[terminal] xterm open failed:', err);
+        setErrorMsg(`xterm failed to open: ${msg}`);
+        return;
+      }
+
+      term.onData((data) => {
+        if (state.disposed) return;
+        ptyWriteString(sessionId, data).catch((e) => console.warn('[terminal] write failed', e));
+      });
+      term.onBinary((data) => {
+        if (state.disposed) return;
+        const bytes = new Uint8Array(data.length);
+        for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
+        ptyWriteBytes(sessionId, bytes).catch((e) => console.warn('[terminal] write-bytes failed', e));
+      });
+
+      let cwd: string;
+      try {
+        setStatusMsg('resolving agent folder…');
+        cwd = await agentFolderPath(agent.folderName);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[terminal] resolve cwd failed:', err);
+        if (!state.disposed) {
+          setErrorMsg(`cannot resolve agent folder: ${msg}`);
+          term.writeln(`\r\n\x1b[31mcannot resolve agent folder: ${msg}\x1b[0m`);
+        }
+        return;
+      }
+
+      if (state.disposed) return;
+
+      try {
+        setStatusMsg('spawning shell…');
         const safeCols = term.cols && term.cols > 2 ? term.cols : 100;
         const safeRows = term.rows && term.rows > 2 ? term.rows : 30;
-
-        term.onData((data) => {
-          ptyWriteString(sessionId, data).catch(() => { /* ignore */ });
-        });
-        term.onBinary((data) => {
-          const bytes = new Uint8Array(data.length);
-          for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
-          ptyWriteBytes(sessionId, bytes).catch(() => { /* ignore */ });
-        });
-
-        // Spawn PTY with a streaming channel. Output arrives in `onData`;
-        // `onReady` is emitted synchronously from the Rust side so we can
-        // verify the IPC plumbing is healthy before the shell even starts.
-        const greet = (text: string) => {
-          if (!disposed && term) term.write(text);
-        };
-        greet('\x1b[90m[connecting…]\x1b[0m\r\n');
-
-        const cwd = await agentFolderPath(agent.folderName);
-        closeChannel = await ptySpawn(sessionId, cwd, safeCols, safeRows, {
-          onReady: () => greet('\x1b[90m[pty ready]\x1b[0m\r\n'),
+        term.write(`\x1b[90m[cwd: ${cwd}]\x1b[0m\r\n`);
+        const closeChannel = await ptySpawn(sessionId, cwd, safeCols, safeRows, {
+          onReady: () => {
+            if (state.disposed) return;
+            setStatusMsg('');
+            term.write('\x1b[90m[pty ready]\x1b[0m\r\n');
+          },
           onData: (bytes) => {
-            if (disposed || !term) return;
+            if (state.disposed) return;
             term.write(bytes);
           },
           onExit: () => {
-            if (disposed || !term) return;
+            if (state.disposed) return;
             term.writeln('\r\n\x1b[90m[session exited]\x1b[0m');
             window.setTimeout(() => onAutoClose(), 600);
           },
         });
-
-        ro = new ResizeObserver(() => fit());
-        ro.observe(el);
+        if (state.disposed) {
+          closeChannel();
+          ptyKill(sessionId).catch(() => { /* ignore */ });
+          return;
+        }
+        state.closeChannel = closeChannel;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        setErrorMsg(msg);
-        if (term) term.writeln(`\r\n\x1b[31m${msg}\x1b[0m`);
+        console.error('[terminal] spawn failed:', err);
+        if (!state.disposed) {
+          setErrorMsg(`spawn failed: ${msg}`);
+          term.writeln(`\r\n\x1b[31mspawn failed: ${msg}\x1b[0m`);
+        }
+        return;
       }
+
+      const ro = new ResizeObserver(() => fit());
+      ro.observe(el);
+      if (state.disposed) { ro.disconnect(); return; }
+      state.ro = ro;
     })();
 
     return () => {
-      disposed = true;
-      if (ro) ro.disconnect();
-      if (closeChannel) closeChannel();
+      state.disposed = true;
+      if (state.ro) state.ro.disconnect();
+      if (state.closeChannel) state.closeChannel();
       ptyKill(sessionId).catch(() => { /* ignore */ });
-      if (term) term.dispose();
+      if (state.term) state.term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
@@ -216,6 +246,9 @@ function TerminalView({ agent, active, onAutoClose }: { agent: Agent; active: bo
   return (
     <div style={{ ...styles.termHost, display: active ? 'block' : 'none' }}>
       <div ref={containerRef} style={styles.termMount} />
+      {statusMsg && !errorMsg && (
+        <div style={styles.statusBanner}>{statusMsg}</div>
+      )}
       {errorMsg && <div style={styles.errorBanner}>{errorMsg}</div>}
     </div>
   );
@@ -250,6 +283,12 @@ const styles: Record<string, React.CSSProperties> = {
   body: { flex: 1, position: 'relative' as const, overflow: 'hidden' },
   termHost: { position: 'absolute' as const, inset: 0 },
   termMount: { width: '100%', height: '100%', padding: 6, boxSizing: 'border-box' as const },
+  statusBanner: {
+    position: 'absolute' as const, left: 10, bottom: 10,
+    padding: '4px 8px', background: 'rgba(100, 149, 237, 0.18)',
+    border: '1px solid rgba(100, 149, 237, 0.4)', color: '#90caf9',
+    borderRadius: 4, fontSize: 11, pointerEvents: 'none' as const,
+  },
   errorBanner: {
     position: 'absolute' as const, left: 10, right: 10, top: 10,
     padding: '6px 10px', background: 'rgba(239, 83, 80, 0.2)',
