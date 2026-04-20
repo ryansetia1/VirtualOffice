@@ -1,8 +1,12 @@
 export const CHAR_COUNT = 40;
 export const CHAR_SHEET_W = 64;
 export const CHAR_SHEET_H = 128;
-export const CHAR_FRAME_W = CHAR_SHEET_W / 3;
-export const CHAR_FRAME_H = CHAR_SHEET_H / 4;
+// The sheet canvas is 64×128 but each character frame is only 20×32.
+// The final 4px column on the right is padding and must not be sampled,
+// otherwise frame 2 (srcX = 2 * 64/3 ≈ 42.67) slides into that empty strip
+// and the sprite appears mis-cropped / shifted.
+export const CHAR_FRAME_W = 20;
+export const CHAR_FRAME_H = 32;
 
 export type Facing = 'down' | 'left' | 'right' | 'up';
 
