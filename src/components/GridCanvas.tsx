@@ -206,7 +206,7 @@ export default function GridCanvas({
       const rect = canvas.getBoundingClientRect();
       const x = clientX - rect.left - effectiveOffset.x;
       const y = clientY - rect.top - effectiveOffset.y;
-      const spriteH = cellPx * 1.35;
+      const spriteH = cellPx * 2.025;
       const spriteW = spriteH * (CHAR_FRAME_W / CHAR_FRAME_H);
       // Iterate last (top) to first so front-most wins
       for (let i = list.length - 1; i >= 0; i--) {
@@ -394,8 +394,9 @@ export default function GridCanvas({
 
     // ── Draw agents (live/read-only mode only) ────────────────────────────
     if (readOnly && agents && agents.length > 0) {
-      // 1-cell footprint, sprite height slightly taller than cell for "standing" feel
-      const spriteH = cellPx * 1.35;
+      // 1-cell footprint, sprite is ~2x cell height so characters read as
+      // "person-size" against the tileset rather than tiny chibis.
+      const spriteH = cellPx * 2.025;
       const spriteW = spriteH * (CHAR_FRAME_W / CHAR_FRAME_H);
       // Sort by y for proper layering (agents lower on screen drawn on top)
       const sortedAgents = [...agents].sort((a, b) => a.row - b.row);
