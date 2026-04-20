@@ -10,7 +10,14 @@ import {
 import type { RoomState, LayerType, Placement } from '../hooks/useGrid';
 import type { ToolState } from '../hooks/useTool';
 import type { CustomAssetData } from '../hooks/useCustomAssets';
+import type { Agent } from '../hooks/useAgents';
 import { getCachedImage } from '../utils/imageLoader';
+import {
+  getCachedCharacter,
+  CHAR_FRAME_W,
+  CHAR_FRAME_H,
+  FACING_ROW,
+} from '../utils/characterImageLoader';
 import { getAssetTileInfo, type AssetTileInfo } from '../data/assetManifest';
 import ZoomNavigator from './ZoomNavigator';
 
@@ -40,6 +47,12 @@ interface Props {
   onRotate?: () => void;
   onFlipH?: () => void;
   onFlipV?: () => void;
+  agents?: Agent[];
+  activeAgentId?: string | null;
+  onActivateAgent?: (id: string) => void;
+  onOpenAgentTerminal?: (id: string) => void;
+  onAgentContextMenu?: (id: string, clientX: number, clientY: number) => void;
+  showNameplates?: boolean;
 }
 
 const GRID_LINE_COLOR = 'rgba(255, 255, 255, 0.06)';
@@ -83,6 +96,12 @@ export default function GridCanvas({
   onRotate,
   onFlipH,
   onFlipV,
+  agents,
+  activeAgentId,
+  onActivateAgent,
+  onOpenAgentTerminal,
+  onAgentContextMenu,
+  showNameplates = true,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -116,19 +135,108 @@ export default function GridCanvas({
 
   const cellPx = room.cellSize * zoom;
 
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+  const activeAgentIdRef = useRef(activeAgentId ?? null);
+  activeAgentIdRef.current = activeAgentId ?? null;
+
+  // ── Effective camera offset ────────────────────────────────────────────────
+  // When in live/read-only mode with an active agent and a room that is larger
+  // than the viewport, derive the camera offset directly from the agent's
+  // position. Deriving (instead of running a separate rAF that calls setOffset)
+  // keeps the agent's world-position and the camera offset inside the *same*
+  // React render. That eliminates the 1-frame drift that was causing the
+  // jagged "camera chasing the agent" effect.
+  const effectiveOffset = useMemo(() => {
+    if (!readOnly) return offset;
+    if (!activeAgentId || !agents) return offset;
+    const w = containerSize.w;
+    const h = containerSize.h;
+    if (w <= 0 || h <= 0) return offset;
+    const a = agents.find((ag) => ag.id === activeAgentId);
+    if (!a) return offset;
+    const cp = room.cellSize * zoom;
+    const gridW = room.width * cp;
+    const gridH = room.height * cp;
+    // Only follow on axes where the room is actually larger than the viewport
+    // (with a small margin so we don't chase pixels when the room "barely" fits).
+    const MARGIN = 24;
+    const fitsX = gridW + MARGIN * 2 <= w;
+    const fitsY = gridH + MARGIN * 2 <= h;
+    if (fitsX && fitsY) return offset;
+    const agentCx = (a.col + 0.5) * cp;
+    const agentCy = (a.row + 0.5) * cp;
+    let x = fitsX ? offset.x : w / 2 - agentCx;
+    let y = fitsY ? offset.y : h / 2 - agentCy;
+    // Clamp so the room doesn't ever scroll fully off-screen on the followed
+    // axes. This also naturally freezes the camera at the edges of the room
+    // rather than the agent drifting off-center once near a wall.
+    if (!fitsX) {
+      const minX = w - gridW;
+      const maxX = 0;
+      if (x < minX) x = minX;
+      if (x > maxX) x = maxX;
+    }
+    if (!fitsY) {
+      const minY = h - gridH;
+      const maxY = 0;
+      if (y < minY) y = minY;
+      if (y > maxY) y = maxY;
+    }
+    return { x, y };
+  }, [
+    readOnly,
+    activeAgentId,
+    agents,
+    offset,
+    containerSize.w,
+    containerSize.h,
+    room.cellSize,
+    room.width,
+    room.height,
+    zoom,
+  ]);
+
+  const hitTestAgent = useCallback(
+    (clientX: number, clientY: number): string | null => {
+      const list = agentsRef.current;
+      if (!list || list.length === 0) return null;
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left - effectiveOffset.x;
+      const y = clientY - rect.top - effectiveOffset.y;
+      const spriteH = cellPx * 1.35;
+      const spriteW = spriteH * (CHAR_FRAME_W / CHAR_FRAME_H);
+      // Iterate last (top) to first so front-most wins
+      for (let i = list.length - 1; i >= 0; i--) {
+        const a = list[i];
+        const centerX = (a.col + 0.5) * cellPx;
+        const footY = (a.row + 1) * cellPx;
+        const destX = centerX - spriteW / 2;
+        const destY = footY - spriteH + cellPx * 0.08;
+        if (x >= destX && x <= destX + spriteW && y >= destY && y <= destY + spriteH) {
+          return a.id;
+        }
+      }
+      return null;
+    },
+    [effectiveOffset.x, effectiveOffset.y, cellPx]
+  );
+
   const toGrid = useCallback(
     (clientX: number, clientY: number) => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
-      const x = clientX - rect.left - offset.x;
-      const y = clientY - rect.top - offset.y;
+      const x = clientX - rect.left - effectiveOffset.x;
+      const y = clientY - rect.top - effectiveOffset.y;
       const col = Math.floor(x / cellPx);
       const row = Math.floor(y / cellPx);
       if (row < 0 || row >= room.height || col < 0 || col >= room.width) return null;
       return { row, col };
     },
-    [offset, cellPx, room.width, room.height]
+    [effectiveOffset, cellPx, room.width, room.height]
   );
 
   const customAssetMap = useMemo(() => {
@@ -248,7 +356,11 @@ export default function GridCanvas({
 
     ctx.clearRect(0, 0, w, h);
     ctx.save();
-    ctx.translate(Math.round(offset.x), Math.round(offset.y));
+    // Keep sub-pixel translation in read-only mode for smooth camera follow;
+    // in build mode, round so grid lines stay crisp.
+    const tx = readOnly ? effectiveOffset.x : Math.round(effectiveOffset.x);
+    const ty = readOnly ? effectiveOffset.y : Math.round(effectiveOffset.y);
+    ctx.translate(tx, ty);
 
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, Math.round(room.width * cellPx), Math.round(room.height * cellPx));
@@ -278,6 +390,86 @@ export default function GridCanvas({
     for (const p of sorted) {
       if (movingPlacement && p.id === movingPlacement.placement.id) continue;
       drawAsset(ctx, p.assetId, p.col, p.row, 1, p.rotation, p.flipH, p.flipV);
+    }
+
+    // ── Draw agents (live/read-only mode only) ────────────────────────────
+    if (readOnly && agents && agents.length > 0) {
+      // 1-cell footprint, sprite height slightly taller than cell for "standing" feel
+      const spriteH = cellPx * 1.35;
+      const spriteW = spriteH * (CHAR_FRAME_W / CHAR_FRAME_H);
+      // Sort by y for proper layering (agents lower on screen drawn on top)
+      const sortedAgents = [...agents].sort((a, b) => a.row - b.row);
+      for (const agent of sortedAgents) {
+        const img = getCachedCharacter(agent.spriteId);
+        const centerX = (agent.col + 0.5) * cellPx;
+        const footY = (agent.row + 1) * cellPx;
+        const destX = centerX - spriteW / 2;
+        const destY = footY - spriteH + cellPx * 0.08; // slight overlap with floor
+        const srcY = FACING_ROW[agent.facing] * CHAR_FRAME_H;
+        const srcX = agent.animFrame * CHAR_FRAME_W;
+
+        // Active ring under feet
+        if (agent.id === activeAgentId) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(79, 195, 247, 0.35)';
+          ctx.beginPath();
+          ctx.ellipse(centerX, footY - cellPx * 0.1, spriteW * 0.4, spriteW * 0.16, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(79, 195, 247, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        if (img) {
+          const prevSmoothing = ctx.imageSmoothingEnabled;
+          ctx.imageSmoothingEnabled = false;
+          // Sub-pixel destination so the sprite slides smoothly with the camera.
+          ctx.drawImage(
+            img,
+            srcX,
+            srcY,
+            CHAR_FRAME_W,
+            CHAR_FRAME_H,
+            destX,
+            destY,
+            spriteW,
+            spriteH
+          );
+          ctx.imageSmoothingEnabled = prevSmoothing;
+        }
+
+        // Nameplate
+        if (showNameplates && cellPx >= 24) {
+          const label = agent.nickname || '(agent)';
+          ctx.save();
+          ctx.font = `${Math.max(10, Math.round(cellPx * 0.24))}px system-ui, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const metrics = ctx.measureText(label);
+          const padX = 6, padY = 3;
+          const tw = metrics.width + padX * 2;
+          const th = Math.max(14, Math.round(cellPx * 0.32));
+          const tx = centerX;
+          const ty = destY - th / 2 - 2;
+          ctx.fillStyle = agent.id === activeAgentId ? 'rgba(79, 195, 247, 0.95)' : 'rgba(20, 24, 34, 0.85)';
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+          ctx.lineWidth = 1;
+          const rectX = tx - tw / 2;
+          const rectY = ty - th / 2;
+          ctx.beginPath();
+          if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(rectX, rectY, tw, th, 4);
+          } else {
+            ctx.rect(rectX, rectY, tw, th);
+          }
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = agent.id === activeAgentId ? '#0d1117' : '#e8eef7';
+          ctx.fillText(label, tx, ty + padY * 0.2);
+          ctx.restore();
+        }
+      }
     }
 
     if (!readOnly) {
@@ -456,7 +648,14 @@ export default function GridCanvas({
 
     ctx.restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, version, offset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey]);
+  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, showNameplates]);
+
+  // ── Camera follow active agent (read-only mode only) ─────────────────────
+  // The camera target is *derived* from agent position (see `effectiveOffset`
+  // above), so there is no separate animation loop here. Keeping the camera
+  // offset inside the same render as the agent's position guarantees they
+  // never drift out of sync for a single frame, which was the root cause of
+  // the jagged camera-follow motion.
 
   // ── Resize observer + center grid on first mount ───────────────────────────
   const hasCentered = useRef(false);
@@ -561,6 +760,9 @@ export default function GridCanvas({
   }, []);
 
   // ── Pointer events ─────────────────────────────────────────────────────────
+  const agentClickTimerRef = useRef<number | null>(null);
+  const agentClickIdRef = useRef<string | null>(null);
+
   const handlePointerDown = useCallback(
     (e: PointerEvent<HTMLCanvasElement>) => {
       if (e.button === 1 || (e.button === 0 && spaceHeld)) {
@@ -568,6 +770,31 @@ export default function GridCanvas({
         panStart.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
         return;
+      }
+
+      // Agent interaction in live (readOnly) mode
+      if (readOnly && e.button === 0) {
+        const hitId = hitTestAgent(e.clientX, e.clientY);
+        if (hitId) {
+          e.preventDefault();
+          if (agentClickTimerRef.current !== null && agentClickIdRef.current === hitId) {
+            // Double-click → open terminal
+            window.clearTimeout(agentClickTimerRef.current);
+            agentClickTimerRef.current = null;
+            agentClickIdRef.current = null;
+            onOpenAgentTerminal?.(hitId);
+          } else {
+            // Schedule single-click activation
+            if (agentClickTimerRef.current !== null) window.clearTimeout(agentClickTimerRef.current);
+            agentClickIdRef.current = hitId;
+            agentClickTimerRef.current = window.setTimeout(() => {
+              agentClickTimerRef.current = null;
+              agentClickIdRef.current = null;
+              onActivateAgent?.(hitId);
+            }, 250);
+          }
+          return;
+        }
       }
 
       if (e.button !== 0 || readOnly) return;
@@ -948,6 +1175,15 @@ export default function GridCanvas({
         onDragOver={handleDragOver}
         onDrop={handleDrop}
         onDragLeave={handleDragLeave}
+        onContextMenu={(e) => {
+          if (readOnly && onAgentContextMenu) {
+            const hitId = hitTestAgent(e.clientX, e.clientY);
+            if (hitId) {
+              e.preventDefault();
+              onAgentContextMenu(hitId, e.clientX, e.clientY);
+            }
+          }
+        }}
         style={{ display: 'block' }}
       />
       {!readOnly && toolState.mode === 'place' && toolState.selectedAssetId === null && cursorPos && !movingPlacement && (
@@ -971,7 +1207,7 @@ export default function GridCanvas({
       <ZoomNavigator
         room={room}
         zoom={zoom}
-        offset={offset}
+        offset={effectiveOffset}
         containerWidth={containerSize.w}
         containerHeight={containerSize.h}
         onZoomChange={onZoomChange}

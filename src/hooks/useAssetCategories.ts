@@ -1,5 +1,12 @@
 import { useCallback, useState, useMemo } from 'react';
 import { getAllAssets, ASSET_COUNT } from '../data/assetManifest';
+import {
+  assetCreateCategory,
+  assetRenameCategory,
+  assetDeleteCategory,
+  assetMoveFile,
+} from '../utils/assetFiles';
+import { refreshAssetImage } from '../utils/imageLoader';
 
 const LIBRARY_KEY = 'virtualOffice_library';
 const TILE_OVERRIDES_KEY = 'virtualOffice_tileOverrides';
@@ -178,6 +185,17 @@ export function useAssetCategories(extraAssetIds?: number[]) {
 
   // ── Category operations ────────────────────────────────────────────────────
 
+  // Resolve the physical file name for a built-in asset. Custom assets (id >= 1000)
+  // are in-memory data URLs and are never mirrored to disk.
+  const filePatternRef = useMemo(() => library.filePattern, [library.filePattern]);
+  const fileNameFor = useCallback(
+    (id: number): string | null => {
+      if (id >= 1000) return null;
+      return filePatternRef.replace('{id}', String(id));
+    },
+    [filePatternRef]
+  );
+
   const createCategory = useCallback((path: string) => {
     const normalized = path.replace(/\/+/g, '/').replace(/^\/|\/$/g, '').trim();
     if (!normalized) return;
@@ -192,32 +210,39 @@ export function useAssetCategories(extraAssetIds?: number[]) {
       }
       return { ...prev, categories: cats };
     });
+    // Mirror to disk (Tauri only). Creates all intermediate dirs automatically.
+    void assetCreateCategory(normalized);
   }, [updateLibrary]);
 
   const renameCategory = useCallback((path: string, newName: string) => {
     const cleaned = newName.trim().replace(/\//g, '');
     if (!cleaned) return;
+    let newPath: string | null = null;
     updateLibrary((prev) => {
       const cats = { ...prev.categories };
       const parts = path.split('/');
       parts[parts.length - 1] = cleaned;
-      const newPath = parts.join('/');
+      const candidate = parts.join('/');
 
-      if (newPath === path) return prev;
-      if (cats[newPath] !== undefined) return prev;
+      if (candidate === path) return prev;
+      if (cats[candidate] !== undefined) return prev;
 
       const updated: Record<string, number[]> = {};
       for (const [key, val] of Object.entries(cats)) {
         if (key === path) {
-          updated[newPath] = val;
+          updated[candidate] = val;
         } else if (key.startsWith(path + '/')) {
-          updated[newPath + key.slice(path.length)] = val;
+          updated[candidate + key.slice(path.length)] = val;
         } else {
           updated[key] = val;
         }
       }
+      newPath = candidate;
       return { ...prev, categories: updated };
     });
+    if (newPath) {
+      void assetRenameCategory(path, newPath);
+    }
   }, [updateLibrary]);
 
   const deleteCategory = useCallback((path: string) => {
@@ -229,6 +254,8 @@ export function useAssetCategories(extraAssetIds?: number[]) {
       for (const k of keysToRemove) delete cats[k];
       return { ...prev, categories: cats };
     });
+    // Rust side moves any remaining files back to root before removing.
+    void assetDeleteCategory(path);
   }, [updateLibrary]);
 
   const moveAssets = useCallback((assetIds: number[], targetPath: string) => {
@@ -248,7 +275,22 @@ export function useAssetCategories(extraAssetIds?: number[]) {
 
       return { ...prev, categories: cats };
     });
-  }, [updateLibrary]);
+
+    // Mirror each built-in asset file to the new category folder (Tauri only).
+    (async () => {
+      await assetCreateCategory(targetPath);
+      const base = library.assetBasePath;
+      const encodedCat = encodeURI(targetPath);
+      for (const id of assetIds) {
+        const fileName = fileNameFor(id);
+        if (!fileName) continue;
+        await assetMoveFile(fileName, targetPath);
+        // Re-fetch the image from the new URL so the browser cache matches the
+        // on-disk layout. Rendering keeps the previous bitmap until this completes.
+        void refreshAssetImage(id, `${base}/${encodedCat}/${fileName}`);
+      }
+    })();
+  }, [updateLibrary, fileNameFor, library.assetBasePath]);
 
   const uncategorizeAssets = useCallback((assetIds: number[]) => {
     updateLibrary((prev) => {
@@ -260,7 +302,17 @@ export function useAssetCategories(extraAssetIds?: number[]) {
       }
       return { ...prev, categories: cats };
     });
-  }, [updateLibrary]);
+
+    (async () => {
+      const base = library.assetBasePath;
+      for (const id of assetIds) {
+        const fileName = fileNameFor(id);
+        if (!fileName) continue;
+        await assetMoveFile(fileName, null);
+        void refreshAssetImage(id, `${base}/${fileName}`);
+      }
+    })();
+  }, [updateLibrary, fileNameFor, library.assetBasePath]);
 
   // ── Asset rename operations ────────────────────────────────────────────────
 
@@ -338,6 +390,26 @@ export function useAssetCategories(extraAssetIds?: number[]) {
     [assetCategoryMap]
   );
 
+  /**
+   * URL where the physical asset file currently lives. Reflects the user's
+   * current category assignment, so that `<img src={resolveAssetUrl(id)}>` and
+   * the pre-loader both hit the correct on-disk location under Tauri.
+   *
+   * In web-only mode files never move, so this always collapses to the root URL.
+   */
+  const resolveAssetUrl = useCallback(
+    (id: number): string => {
+      if (id >= 1000) return ''; // custom assets don't live on disk
+      const file = library.filePattern.replace('{id}', String(id));
+      const cat = assetCategoryMap.get(id);
+      const base = library.assetBasePath;
+      if (!cat) return `${base}/${file}`;
+      // encodeURI preserves '/' between segments but escapes spaces etc.
+      return `${base}/${encodeURI(cat)}/${file}`;
+    },
+    [library.assetBasePath, library.filePattern, assetCategoryMap]
+  );
+
   return {
     library,
     categoryTree,
@@ -354,6 +426,7 @@ export function useAssetCategories(extraAssetIds?: number[]) {
 
     getAssetDisplayName,
     getCategoryForAsset,
+    resolveAssetUrl,
     renameAsset,
     clearAssetName,
     batchRenameAssets,

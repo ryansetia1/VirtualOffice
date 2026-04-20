@@ -19,7 +19,8 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 export async function preloadAllAssets(
-  onProgress?: (loaded: number, total: number) => void
+  onProgress?: (loaded: number, total: number) => void,
+  urlResolver?: (id: number) => string
 ): Promise<void> {
   if (getLoaded()) return;
 
@@ -32,8 +33,23 @@ export async function preloadAllAssets(
     const batch = assets.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
       batch.map(async (asset) => {
-        const img = await loadImage(asset.path);
-        imageCache.set(asset.id, img);
+        // Prefer the caller-provided URL so the preloader respects the user's
+        // current category assignments (files may physically live in subfolders).
+        const resolvedUrl = urlResolver?.(asset.id);
+        const url = resolvedUrl && resolvedUrl.length > 0 ? resolvedUrl : asset.path;
+        try {
+          const img = await loadImage(url);
+          imageCache.set(asset.id, img);
+        } catch {
+          // Fallback: if the category-aware URL failed (file missing), try the
+          // canonical root URL so at least the built-in default still loads.
+          if (url !== asset.path) {
+            try {
+              const img = await loadImage(asset.path);
+              imageCache.set(asset.id, img);
+            } catch { /* ignore */ }
+          }
+        }
       })
     );
     completed += results.length;
@@ -41,6 +57,21 @@ export async function preloadAllAssets(
   }
 
   setLoaded(true);
+}
+
+/**
+ * Re-fetch a single asset's image (used after the underlying file has been
+ * moved to a new category folder). Safe to ignore errors — rendering will
+ * continue to use the previously cached bitmap.
+ */
+export async function refreshAssetImage(assetId: number, url: string): Promise<void> {
+  if (!url) return;
+  try {
+    const img = await loadImage(url);
+    imageCache.set(assetId, img);
+  } catch {
+    // leave old cache in place
+  }
 }
 
 export function getCachedImage(assetId: number): HTMLImageElement | undefined {

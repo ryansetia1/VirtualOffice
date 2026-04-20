@@ -29,6 +29,10 @@ interface Props {
   onClearTileOverride: (id: number) => void;
   onAddCustomAssets: (assets: Omit<CustomAssetData, 'id'>[]) => Promise<CustomAssetData[]>;
   onRemoveCustomAsset: (id: number) => void;
+  resolveAssetUrl?: (id: number) => string;
+  blockingOverrides: Record<number, 'walkable' | 'blocking'>;
+  onSetBlocking: (id: number, value: 'walkable' | 'blocking') => void;
+  onClearBlocking: (id: number) => void;
 }
 
 const UNCATEGORIZED = '__uncategorized__';
@@ -55,6 +59,10 @@ export default function AssetManager({
   onClearTileOverride,
   onAddCustomAssets,
   onRemoveCustomAsset,
+  resolveAssetUrl,
+  blockingOverrides,
+  onSetBlocking,
+  onClearBlocking,
 }: Props) {
   const [selectedView, setSelectedView] = useState<string>(ALL_VIEW);
   const [search, setSearch] = useState('');
@@ -347,6 +355,21 @@ export default function AssetManager({
       });
     }
 
+    // Walkability toggle (agent collision)
+    {
+      const anyWalkable = targetIds.some((id) => blockingOverrides[id] === 'walkable');
+      items.push({
+        label: anyWalkable ? 'Mark as Blocking (agents)' : 'Mark as Walkable (agents)',
+        onClick: () => {
+          if (anyWalkable) {
+            for (const id of targetIds) onClearBlocking(id);
+          } else {
+            for (const id of targetIds) onSetBlocking(id, 'walkable');
+          }
+        },
+      });
+    }
+
     if (hasCustom) {
       const customIds = targetIds.filter((id) => customAssetMap.has(id));
       const deleteLabel = customIds.length > 1
@@ -378,7 +401,7 @@ export default function AssetManager({
     }
 
     return items;
-  }, [customAssetMap, getAssetDisplayName, allCategoryPaths, assetCategoryMap, onUncategorizeAssets, onRemoveCustomAsset]);
+  }, [customAssetMap, getAssetDisplayName, allCategoryPaths, assetCategoryMap, onUncategorizeAssets, onRemoveCustomAsset, blockingOverrides, onSetBlocking, onClearBlocking]);
 
   const handleAssetRenameSubmit = useCallback(() => {
     if (renamingAssetId === null) return;
@@ -598,11 +621,14 @@ export default function AssetManager({
                     }}>
                       <AssetThumbnail
                         assetId={asset.id}
-                        path={asset.path}
+                        path={resolveAssetUrl ? resolveAssetUrl(asset.id) || asset.path : asset.path}
                         tileOverrides={tileOverrides}
                       />
                       {hasTileOverride && <div style={styles.tileDot} />}
                       {isCustom && <div style={styles.customDot} />}
+                      {blockingOverrides[asset.id] === 'walkable' && (
+                        <div style={styles.walkableBadge} title="Walkable by agents">W</div>
+                      )}
                     </div>
                     {isSelected && <div style={styles.selectionOverlay} />}
                     <div style={styles.cardInfo}>
@@ -913,6 +939,13 @@ const styles: Record<string, React.CSSProperties> = {
   },
   customDot: {
     position: 'absolute' as const, bottom: 4, right: 4, width: 6, height: 6, borderRadius: '50%', background: '#81c784',
+  },
+  walkableBadge: {
+    position: 'absolute' as const, top: 4, left: 4,
+    fontSize: 9, fontWeight: 700, lineHeight: 1,
+    padding: '2px 4px', borderRadius: 3,
+    background: 'rgba(129, 199, 132, 0.9)', color: '#0d1117',
+    border: '1px solid rgba(0, 0, 0, 0.25)',
   },
   cardInfo: { padding: '4px 6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
   cardName: {

@@ -8,6 +8,8 @@ const KEYS = [
   'virtualOffice_library',
   'virtualOffice_tileOverrides',
   'virtualOffice_customAssets',
+  'virtualOffice_agents',
+  'virtualOffice_blockingOverrides',
 ] as const;
 
 const FILE_HEADER = 'virtualOffice_project';
