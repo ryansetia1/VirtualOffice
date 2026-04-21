@@ -25,7 +25,6 @@ import AssetPalette from './components/AssetPalette';
 import Toolbar from './components/Toolbar';
 import AssetManager from './components/AssetManager';
 import LayersPanel from './components/LayersPanel';
-import DragOverlay from './components/DragOverlay';
 import LiveHeader from './components/LiveHeader';
 import AddAgentModal from './components/AddAgentModal';
 import ContextMenu, { type MenuItem } from './components/ContextMenu';
@@ -583,8 +582,6 @@ export default function App() {
           onClearBlocking={blockingApi.clearBlocking}
         />
       )}
-      <DragOverlay tileOverrides={tileOverrides} />
-
       {(() => {
         const openTerminals = openTerminalIds
           .map((id) => {
