@@ -85,9 +85,18 @@ interface TerminalViewProps {
    * demote the agent back to "fresh" state so fallback sticks.
    */
   onPatternFallback?: () => void;
+  /**
+   * Called once the start command has been sent to the PTY. The parent
+   * uses this to *optimistically* mark `hasPreviousConversation = true`
+   * so that subsequent opens (including after an app crash or forced
+   * quit that skipped `onSessionEnded`) try the continue command first.
+   * False positives are harmless — the pattern-fallback flow will Ctrl+C
+   * and restart clean if there's nothing to resume.
+   */
+  onSessionStarted?: () => void;
 }
 
-export function TerminalView({ agent, target, active, onAutoClose, onSessionEnded, onPatternFallback }: TerminalViewProps) {
+export function TerminalView({ agent, target, active, onAutoClose, onSessionEnded, onPatternFallback, onSessionStarted }: TerminalViewProps) {
   const sessionId = `agent:${agent.id}`;
 
   // The div we imperatively append to the current chrome slot. State so the
@@ -273,6 +282,12 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
                 ptyWriteString(sessionId, `${startCmd}\r`)
                   .catch((e) => console.warn('[terminal] start send failed', e));
               }
+              // Optimistically promote the conversation state so the *next*
+              // open tries continue first — even if the app dies before
+              // `onSessionEnded` ever fires. If there's nothing to continue,
+              // the pattern watcher will fall back and demote this back to
+              // false, so the flag self-corrects.
+              onSessionStarted?.();
             }, 200);
           },
           onData: (bytes) => {

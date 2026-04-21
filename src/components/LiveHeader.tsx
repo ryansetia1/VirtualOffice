@@ -8,7 +8,9 @@ interface Props {
   activeAgentId: string | null;
   onAddAgent: () => void;
   onAdoptFolder: (folderName: string) => void;
-  onActivate: (agentId: string) => void;
+  /** Receives the agent id when the user picks a chip, or `null` when they
+   *  click the currently-active chip (toggle-off) so the camera can unlock. */
+  onActivate: (agentId: string | null) => void;
   /** Bump this counter to force refresh of orphan list */
   refreshKey?: number;
 }
@@ -48,8 +50,14 @@ export default function LiveHeader({ agents, activeAgentId, onAddAgent, onAdoptF
           <button
             key={a.id}
             style={{ ...styles.agentChip, ...(a.id === activeAgentId ? styles.agentChipActive : {}) }}
-            onClick={() => onActivate(a.id)}
-            title={`${a.nickname} — projects/${a.folderName}`}
+            // Clicking the already-active chip deselects (toggle-off) so the
+            // user can step out of follow-mode straight from the header.
+            onClick={() => onActivate(a.id === activeAgentId ? null : a.id)}
+            title={
+              a.id === activeAgentId
+                ? `${a.nickname} — click to deselect`
+                : `${a.nickname} — projects/${a.folderName}`
+            }
           >
             <span style={styles.chipDot} />
             <span>{a.nickname}</span>
@@ -84,7 +92,7 @@ export default function LiveHeader({ agents, activeAgentId, onAddAgent, onAdoptF
       )}
 
       <div style={styles.spacer} />
-      <span style={styles.hint}>WASD to move · Click to activate · Double-click to open terminal</span>
+      <span style={styles.hint}>WASD to move · Click to activate · Click empty / Esc to deselect · Double-click to open terminal</span>
     </div>
   );
 }

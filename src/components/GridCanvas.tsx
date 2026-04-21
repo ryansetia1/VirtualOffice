@@ -55,6 +55,10 @@ interface Props {
    *  "click to take over / double-click to open terminal". */
   hoveredAgentId?: string | null;
   onActivateAgent?: (id: string) => void;
+  /** Fires when the user clicks empty space (or re-clicks the active agent)
+   *  in live/read-only mode. Parent typically responds by clearing the
+   *  active agent so the camera unlocks and WASD stops driving someone. */
+  onDeactivateAgent?: () => void;
   onOpenAgentTerminal?: (id: string) => void;
   onAgentContextMenu?: (id: string, clientX: number, clientY: number) => void;
   /** Fires whenever the agent under the cursor changes (null when the
@@ -123,6 +127,7 @@ export default function GridCanvas({
   activeAgentId,
   hoveredAgentId,
   onActivateAgent,
+  onDeactivateAgent,
   onOpenAgentTerminal,
   onAgentContextMenu,
   onAgentHover,
@@ -1032,9 +1037,25 @@ export default function GridCanvas({
             agentClickTimerRef.current = window.setTimeout(() => {
               agentClickTimerRef.current = null;
               agentClickIdRef.current = null;
-              onActivateAgent?.(hitId);
+              // Toggle-off if the clicked agent is already active, so a
+              // single-click on the active agent frees the camera. Matches
+              // the intuition "click empty = deselect, click me again = also
+              // deselect".
+              if (activeAgentIdRef.current === hitId) {
+                onDeactivateAgent?.();
+              } else {
+                onActivateAgent?.(hitId);
+              }
             }, 250);
           }
+          return;
+        }
+        // Empty-space click in live mode = deselect. Users were previously
+        // stuck with the camera locked to whatever agent they first clicked;
+        // this restores free-roam behavior without needing a dedicated button.
+        if (activeAgentIdRef.current !== null) {
+          e.preventDefault();
+          onDeactivateAgent?.();
           return;
         }
       }

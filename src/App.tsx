@@ -57,7 +57,9 @@ export default function App() {
   const [loadProgress, setLoadProgress] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [liveZoom, setLiveZoom] = useState(1);
-  const [activeTab, setActiveTab] = useState<AppTab>('build');
+  // Start in live mode so the room is immediately interactive when the app
+  // opens. Users who want to edit can still flip to build via the tab bar.
+  const [activeTab, setActiveTab] = useState<AppTab>('live');
   const [collisionDebug, setCollisionDebug] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(EMPTY_SET);
   const [hoveredIds, setHoveredIds] = useState<Set<string>>(EMPTY_SET);
@@ -253,6 +255,15 @@ export default function App() {
     agentsApi.setHasPreviousConversation(agentId, false);
   }, [agentsApi]);
 
+  // Optimistic "has-previous" promotion: fired once the start command has
+  // been written to the PTY. Without this, a forced-quit / crash between
+  // "session started" and "session ended" leaves the flag at `false` and
+  // the next open silently skips the continue command even though the tool
+  // (e.g., claude-code) actually has a conversation on disk to resume.
+  const handleSessionStarted = useCallback((agentId: string) => {
+    agentsApi.setHasPreviousConversation(agentId, true);
+  }, [agentsApi]);
+
   const handleExport = useCallback(() => {
     saveRoom(room);
     exportProject();
@@ -325,10 +336,21 @@ export default function App() {
         e.preventDefault();
         setCollisionDebug((v) => !v);
       }
+      // Escape in live mode = deselect the active agent. Quick way to free
+      // the camera without having to click an exact empty patch of floor.
+      if (
+        !e.metaKey && !e.ctrlKey && !e.altKey &&
+        e.key === 'Escape' &&
+        activeTab === 'live' &&
+        agentsApi.activeAgentId
+      ) {
+        e.preventDefault();
+        agentsApi.setActive(null);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [undo, redo, activeTab]);
+  }, [undo, redo, activeTab, agentsApi]);
 
   // Snap trapped agents to nearest walkable cell when they become active
   // (e.g., if the room was edited while the agent was off-screen).
@@ -569,6 +591,7 @@ export default function App() {
               activeAgentId={agentsApi.activeAgentId}
               hoveredAgentId={hoveredAgentId}
               onActivateAgent={agentsApi.setActive}
+              onDeactivateAgent={() => agentsApi.setActive(null)}
               onOpenAgentTerminal={openAgentTerminal}
               onAgentContextMenu={(id, x, y) => setAgentCtx({ id, x, y })}
               onAgentHover={(id) => {
@@ -841,6 +864,7 @@ export default function App() {
                 onAutoClose={() => closeAgentTerminal(t.id)}
                 onSessionEnded={() => handleSessionEnded(t.id)}
                 onPatternFallback={() => handlePatternFallback(t.id)}
+                onSessionStarted={() => handleSessionStarted(t.id)}
               />
             ))}
           </>

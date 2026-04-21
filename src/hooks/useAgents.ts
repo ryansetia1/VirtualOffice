@@ -73,11 +73,11 @@ function loadStored(): StoredState {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return { agents: [], activeAgentId: null };
     const agents: Agent[] = Array.isArray(parsed.agents) ? parsed.agents.map(normalizeAgent).filter(Boolean) as Agent[] : [];
-    const activeAgentId = typeof parsed.activeAgentId === 'string' && agents.some((a) => a.id === parsed.activeAgentId)
-      ? parsed.activeAgentId
-      : null;
     syncCounter(agents);
-    return { agents, activeAgentId };
+    // Deliberately ignore any persisted `activeAgentId` — every cold start
+    // begins with no agent selected so the camera is free and agents wander
+    // unattended until the user explicitly picks one to follow / drive.
+    return { agents, activeAgentId: null };
   } catch {
     return { agents: [], activeAgentId: null };
   }
