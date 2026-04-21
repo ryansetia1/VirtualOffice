@@ -19,9 +19,10 @@ const TILE = 48;
 const AGENT_FOOTPRINT = 0.7;
 
 export interface MasksApi {
-  /** Returns the effective mask (override ∪ auto) for an asset, or null if
-   * no mask is known yet (image still loading). */
-  getMask(assetId: number): PixelMask | null;
+  /** Returns the effective mask for a placement, honoring per-placement
+   * overrides first, then per-asset overrides, then the auto mask. Returns
+   * `null` if no mask is known yet (image still loading). */
+  getEffectiveMaskFor(placement: { id: string; assetId: number }): PixelMask | null;
 }
 
 function placementCovers(
@@ -62,7 +63,7 @@ function objectBlockedAtPixel(
   for (const p of room.placements) {
     if (p.layer !== 'object') continue;
     if (!placementCovers(p, r, c)) continue;
-    const mask = masks.getMask(p.assetId);
+    const mask = masks.getEffectiveMaskFor(p);
     if (!mask) {
       // Mask not yet known — be conservative and treat the covered cell as
       // blocking. This matches the legacy default where object placements

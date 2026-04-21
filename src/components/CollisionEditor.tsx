@@ -13,6 +13,8 @@ import {
 
 const TILE = 48;
 
+export type CollisionScope = 'placement' | 'asset';
+
 interface Props {
   assetId: number;
   displayName?: string;
@@ -31,6 +33,17 @@ interface Props {
   onSave: (mask: PixelMask) => void;
   onReset: () => void;
   onClose: () => void;
+  /** Optional scope toggle rendered above the title. When set, the user can
+   *  switch between editing just this placement and editing the asset's
+   *  default that applies to every instance. The parent owns scope state and
+   *  is expected to remount the editor (via `key`) on change so the in-memory
+   *  painting resets to the new scope's mask. */
+  scopeControl?: {
+    scope: CollisionScope;
+    onScopeChange: (next: CollisionScope) => void;
+    placementLabel?: string;
+    assetLabel?: string;
+  };
 }
 
 type Tool = 'brush' | 'eraser';
@@ -54,6 +67,7 @@ export default function CollisionEditor({
   onSave,
   onReset,
   onClose,
+  scopeControl,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mask, setMask] = useState<PixelMask>(() => {
@@ -277,11 +291,36 @@ export default function CollisionEditor({
     <div style={styles.overlay} onClick={onClose}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
-          <div>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <div style={styles.title}>Collision — {displayName ?? `Asset #${assetId}`}</div>
             <div style={styles.subtitle}>
               Paint the pixels that block agents. Transparent areas let agents walk through.
             </div>
+            {scopeControl && (
+              <div style={styles.scopeRow}>
+                <span style={styles.toolLabel}>Applies to</span>
+                <div style={styles.scopeGroup}>
+                  <button
+                    style={{
+                      ...styles.scopeBtn,
+                      ...(scopeControl.scope === 'placement' ? styles.scopeBtnActive : {}),
+                    }}
+                    onClick={() => scopeControl.onScopeChange('placement')}
+                  >
+                    {scopeControl.placementLabel ?? 'This object only'}
+                  </button>
+                  <button
+                    style={{
+                      ...styles.scopeBtn,
+                      ...(scopeControl.scope === 'asset' ? styles.scopeBtnActive : {}),
+                    }}
+                    onClick={() => scopeControl.onScopeChange('asset')}
+                  >
+                    {scopeControl.assetLabel ?? 'All of this type'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           <button style={styles.closeBtn} onClick={onClose}>×</button>
         </div>
@@ -388,6 +427,18 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 10px', background: 'var(--bg-surface)', borderRadius: 6,
   },
   toolGroup: { display: 'flex', alignItems: 'center', gap: 6 },
+  scopeRow: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 },
+  scopeGroup: {
+    display: 'inline-flex', padding: 2, background: 'var(--bg-primary)',
+    border: '1px solid var(--border)', borderRadius: 6, gap: 2,
+  },
+  scopeBtn: {
+    padding: '4px 10px', background: 'transparent', color: 'var(--text-secondary)',
+    border: 'none', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+  },
+  scopeBtnActive: {
+    background: 'var(--accent)', color: '#0d1117', fontWeight: 600,
+  },
   toolLabel: { fontSize: 10, color: 'var(--text-muted)', fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase' },
   toolBtn: {
     padding: '4px 10px', background: 'var(--bg-primary)', color: 'var(--text-primary)',

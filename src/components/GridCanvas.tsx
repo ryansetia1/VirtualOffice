@@ -19,6 +19,7 @@ import {
   FACING_ROW,
 } from '../utils/characterImageLoader';
 import { getAssetTileInfo, type AssetTileInfo } from '../data/assetManifest';
+import type { PixelMask } from '../utils/pixelMasks';
 import ZoomNavigator from './ZoomNavigator';
 
 interface Props {
@@ -52,7 +53,21 @@ interface Props {
   onActivateAgent?: (id: string) => void;
   onOpenAgentTerminal?: (id: string) => void;
   onAgentContextMenu?: (id: string, clientX: number, clientY: number) => void;
+  onPlacementContextMenu?: (placement: Placement, clientX: number, clientY: number) => void;
+  /** Returns the effective render-order override for a placement:
+   *    - `'auto'`  — follow normal y-sort (default).
+   *    - `'above'` — force-render after any agent.
+   *    - `'below'` — force-render before any agent.
+   *  When omitted, every placement is treated as `'auto'`. */
+  getRenderOrder?: (placement: Placement) => 'auto' | 'above' | 'below';
   showNameplates?: boolean;
+  /** When true (and `readOnly`), overlays a red tint on every pixel that
+   *  currently blocks agent movement. Useful to diagnose "invisible walls"
+   *  caused by faint shadow pixels in an asset. */
+  collisionDebug?: boolean;
+  /** Supplies the effective collision mask for a placement. Only consulted
+   *  when `collisionDebug` is on. */
+  getPlacementCollisionMask?: (p: Placement) => PixelMask | null;
 }
 
 const GRID_LINE_COLOR = 'rgba(255, 255, 255, 0.06)';
@@ -101,7 +116,11 @@ export default function GridCanvas({
   onActivateAgent,
   onOpenAgentTerminal,
   onAgentContextMenu,
+  onPlacementContextMenu,
+  getRenderOrder,
   showNameplates = true,
+  collisionDebug = false,
+  getPlacementCollisionMask,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -139,6 +158,12 @@ export default function GridCanvas({
   agentsRef.current = agents;
   const activeAgentIdRef = useRef(activeAgentId ?? null);
   activeAgentIdRef.current = activeAgentId ?? null;
+
+  // Cache of red-tinted offscreen canvases keyed by `PixelMask` reference.
+  // Masks are immutable once decoded, so identity is a safe cache key. Cleared
+  // only on unmount; memory usage is proportional to distinct mask images in
+  // use, which is bounded by (asset count + edited placements).
+  const maskOverlayCacheRef = useRef<WeakMap<PixelMask, HTMLCanvasElement>>(new WeakMap());
 
   // ── Effective camera offset ────────────────────────────────────────────────
   // When in live/read-only mode with an active agent and a room that is larger
@@ -214,7 +239,7 @@ export default function GridCanvas({
         const centerX = (a.col + 0.5) * cellPx;
         const footY = (a.row + 1) * cellPx;
         const destX = centerX - spriteW / 2;
-        const destY = footY - spriteH + cellPx * 0.08;
+        const destY = footY - spriteH;
         if (x >= destX && x <= destX + spriteW && y >= destY && y <= destY + spriteH) {
           return a.id;
         }
@@ -387,89 +412,249 @@ export default function GridCanvas({
         return za - zb;
       });
 
+    // ── Unified y-sorted stream for the object layer + agents ────────────
+    //
+    // Draw lower layers (floor, wall) first — they sit below everything and
+    // never participate in agent occlusion. Then build a single sorted stream
+    // mixing object-layer placements and agents so they y-sort against each
+    // other the way Godot's YSort / Unity 2D / Stardew Valley do: whoever's
+    // foot is lower on screen renders last (= visually in front).
+    //
+    // The `getRenderOrder` hook lets the user pin a specific placement (or
+    // every placement of an asset) to always draw above or below agents,
+    // regardless of y-position. This covers the "tall back wall" and "floor
+    // art on object layer" edge cases without giving up the automatic,
+    // position-based occlusion that Just Works for everything else.
+    const nonObjectLayer: Placement[] = [];
+    const objectLayer: Placement[] = [];
     for (const p of sorted) {
       if (movingPlacement && p.id === movingPlacement.placement.id) continue;
+      if (p.layer === 'object') objectLayer.push(p);
+      else nonObjectLayer.push(p);
+    }
+
+    // Floor + wall, painter's-algorithm style (already sorted by layer then
+    // z-index above).
+    for (const p of nonObjectLayer) {
       drawAsset(ctx, p.assetId, p.col, p.row, 1, p.rotation, p.flipH, p.flipV);
     }
 
-    // ── Draw agents (live/read-only mode only) ────────────────────────────
+    type StreamItem =
+      | { kind: 'placement'; bucket: 0 | 1 | 2; sortY: number; stableIdx: number; data: Placement }
+      | { kind: 'agent'; bucket: 0 | 1 | 2; sortY: number; stableIdx: number; data: Agent };
+
+    const stream: StreamItem[] = [];
+    // Placements: bucket 0 = 'below agent', 1 = 'auto', 2 = 'above agent'.
+    // Within a bucket we y-sort by natural bottom edge so two objects keep
+    // their normal relative depth.
+    for (let i = 0; i < objectLayer.length; i++) {
+      const p = objectLayer[i];
+      const order = getRenderOrder?.(p) ?? 'auto';
+      const bucket: 0 | 1 | 2 = order === 'below' ? 0 : order === 'above' ? 2 : 1;
+      const natural = p.zIndex ?? (p.row + p.spanH) * 1000;
+      stream.push({ kind: 'placement', bucket, sortY: natural, stableIdx: i, data: p });
+    }
+    // Agents live in the auto bucket — their sort key is the foot row so they
+    // y-sort against object-layer placements naturally (`row + 1 == spanH`
+    // for a 1-cell footprint, matching the placement convention).
     if (readOnly && agents && agents.length > 0) {
-      // 1-cell footprint, sprite is ~2x cell height so characters read as
-      // "person-size" against the tileset rather than tiny chibis.
-      const spriteH = cellPx * 2.025;
-      const spriteW = spriteH * (CHAR_FRAME_W / CHAR_FRAME_H);
-      // Sort by y for proper layering (agents lower on screen drawn on top)
-      const sortedAgents = [...agents].sort((a, b) => a.row - b.row);
-      for (const agent of sortedAgents) {
-        const img = getCachedCharacter(agent.spriteId);
-        const centerX = (agent.col + 0.5) * cellPx;
-        const footY = (agent.row + 1) * cellPx;
-        const destX = centerX - spriteW / 2;
-        const destY = footY - spriteH + cellPx * 0.08; // slight overlap with floor
-        const srcY = FACING_ROW[agent.facing] * CHAR_FRAME_H;
-        const srcX = agent.animFrame * CHAR_FRAME_W;
+      for (let i = 0; i < agents.length; i++) {
+        const a = agents[i];
+        stream.push({
+          kind: 'agent',
+          bucket: 1,
+          sortY: (a.row + 1) * 1000,
+          // Offset stableIdx so agents don't collide with placement indices
+          // at identical sortY — purely a deterministic tiebreak.
+          stableIdx: 1_000_000 + i,
+          data: a,
+        });
+      }
+    }
+    stream.sort((x, y) => {
+      if (x.bucket !== y.bucket) return x.bucket - y.bucket;
+      if (x.sortY !== y.sortY) return x.sortY - y.sortY;
+      return x.stableIdx - y.stableIdx;
+    });
 
-        // Active ring under feet
-        if (agent.id === activeAgentId) {
-          ctx.save();
-          ctx.fillStyle = 'rgba(79, 195, 247, 0.35)';
-          ctx.beginPath();
-          ctx.ellipse(centerX, footY - cellPx * 0.1, spriteW * 0.4, spriteW * 0.16, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(79, 195, 247, 0.8)';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-          ctx.restore();
+    // Agent sprite dimensions (same for every agent — sprite is ~2× cell
+    // height so characters read as person-sized).
+    const spriteH = cellPx * 2.025;
+    const spriteW = spriteH * (CHAR_FRAME_W / CHAR_FRAME_H);
+
+    for (const item of stream) {
+      if (item.kind === 'placement') {
+        const p = item.data;
+        drawAsset(ctx, p.assetId, p.col, p.row, 1, p.rotation, p.flipH, p.flipV);
+        continue;
+      }
+
+      const agent = item.data;
+      const img = getCachedCharacter(agent.spriteId);
+      const centerX = (agent.col + 0.5) * cellPx;
+      const footY = (agent.row + 1) * cellPx;
+      const destX = centerX - spriteW / 2;
+      // Feet sit exactly on the bottom edge of the agent's cell so they never
+      // visually poke into the neighboring cell (which could be a wall).
+      const destY = footY - spriteH;
+      const srcY = FACING_ROW[agent.facing] * CHAR_FRAME_H;
+      const srcX = agent.animFrame * CHAR_FRAME_W;
+
+      // Active ring under feet.
+      //   The ring must sit *within* the agent's cell — otherwise it visibly
+      //   bleeds onto whatever is in the cell below (walls, floor tile, etc.)
+      //   We anchor the bottom of the ellipse flush with `footY` so the whole
+      //   ring is contained in the agent's cell.
+      if (agent.id === activeAgentId) {
+        const ringRx = spriteW * 0.4;
+        const ringRy = spriteW * 0.16;
+        const ringCy = footY - ringRy;
+        ctx.save();
+        ctx.fillStyle = 'rgba(79, 195, 247, 0.35)';
+        ctx.beginPath();
+        ctx.ellipse(centerX, ringCy, ringRx, ringRy, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(79, 195, 247, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      if (img) {
+        const prevSmoothing = ctx.imageSmoothingEnabled;
+        ctx.imageSmoothingEnabled = false;
+        // Sub-pixel destination so the sprite slides smoothly with the camera.
+        ctx.drawImage(
+          img,
+          srcX,
+          srcY,
+          CHAR_FRAME_W,
+          CHAR_FRAME_H,
+          destX,
+          destY,
+          spriteW,
+          spriteH
+        );
+        ctx.imageSmoothingEnabled = prevSmoothing;
+      }
+
+      // Nameplate
+      if (showNameplates && cellPx >= 24) {
+        const label = agent.nickname || '(agent)';
+        ctx.save();
+        ctx.font = `${Math.max(10, Math.round(cellPx * 0.24))}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const metrics = ctx.measureText(label);
+        const padX = 6, padY = 3;
+        const tw = metrics.width + padX * 2;
+        const th = Math.max(14, Math.round(cellPx * 0.32));
+        const tx = centerX;
+        const ty = destY - th / 2 - 2;
+        ctx.fillStyle = agent.id === activeAgentId ? 'rgba(79, 195, 247, 0.95)' : 'rgba(20, 24, 34, 0.85)';
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.lineWidth = 1;
+        const rectX = tx - tw / 2;
+        const rectY = ty - th / 2;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(rectX, rectY, tw, th, 4);
+        } else {
+          ctx.rect(rectX, rectY, tw, th);
         }
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = agent.id === activeAgentId ? '#0d1117' : '#e8eef7';
+        ctx.fillText(label, tx, ty + padY * 0.2);
+        ctx.restore();
+      }
+    }
 
-        if (img) {
-          const prevSmoothing = ctx.imageSmoothingEnabled;
-          ctx.imageSmoothingEnabled = false;
-          // Sub-pixel destination so the sprite slides smoothly with the camera.
-          ctx.drawImage(
-            img,
-            srcX,
-            srcY,
-            CHAR_FRAME_W,
-            CHAR_FRAME_H,
-            destX,
-            destY,
-            spriteW,
-            spriteH
-          );
-          ctx.imageSmoothingEnabled = prevSmoothing;
-        }
+    // ── Collision-debug overlay ────────────────────────────────────────────
+    // Toggled by the 'C' key in live mode. Renders a red tint on every pixel
+    // that blocks agent movement so the user can see *exactly* what's
+    // stopping them (typically faint shadow pixels under an asset). We draw
+    // this after the y-sorted stream so the tint sits on top of objects and
+    // agents alike.
+    if (readOnly && collisionDebug && getPlacementCollisionMask) {
+      const cache = maskOverlayCacheRef.current;
+      for (const p of room.placements) {
+        if (p.layer !== 'object') continue;
+        if ((room.layerVisibility ?? {}).object === false) continue;
+        const mask = getPlacementCollisionMask(p);
+        if (!mask) continue;
 
-        // Nameplate
-        if (showNameplates && cellPx >= 24) {
-          const label = agent.nickname || '(agent)';
-          ctx.save();
-          ctx.font = `${Math.max(10, Math.round(cellPx * 0.24))}px system-ui, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          const metrics = ctx.measureText(label);
-          const padX = 6, padY = 3;
-          const tw = metrics.width + padX * 2;
-          const th = Math.max(14, Math.round(cellPx * 0.32));
-          const tx = centerX;
-          const ty = destY - th / 2 - 2;
-          ctx.fillStyle = agent.id === activeAgentId ? 'rgba(79, 195, 247, 0.95)' : 'rgba(20, 24, 34, 0.85)';
-          ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
-          ctx.lineWidth = 1;
-          const rectX = tx - tw / 2;
-          const rectY = ty - th / 2;
-          ctx.beginPath();
-          if (typeof ctx.roundRect === 'function') {
-            ctx.roundRect(rectX, rectY, tw, th, 4);
-          } else {
-            ctx.rect(rectX, rectY, tw, th);
+        let overlay = cache.get(mask);
+        if (!overlay) {
+          overlay = document.createElement('canvas');
+          overlay.width = mask.w;
+          overlay.height = mask.h;
+          const octx = overlay.getContext('2d');
+          if (octx) {
+            const imgData = octx.createImageData(mask.w, mask.h);
+            const data = imgData.data;
+            const { bits, w, h } = mask;
+            for (let y = 0; y < h; y++) {
+              for (let x = 0; x < w; x++) {
+                const idx = y * w + x;
+                const bit = (bits[idx >> 3] >> (idx & 7)) & 1;
+                if (bit) {
+                  const i = idx * 4;
+                  data[i] = 239;     // R
+                  data[i + 1] = 83;  // G
+                  data[i + 2] = 80;  // B
+                  data[i + 3] = 160; // A
+                }
+              }
+            }
+            octx.putImageData(imgData, 0, 0);
           }
-          ctx.fill();
-          ctx.stroke();
-          ctx.fillStyle = agent.id === activeAgentId ? '#0d1117' : '#e8eef7';
-          ctx.fillText(label, tx, ty + padY * 0.2);
-          ctx.restore();
+          cache.set(mask, overlay);
         }
+
+        const info = resolveTileInfo(p.assetId);
+        const [sw, sh] = resolveSize(p.assetId, p.rotation);
+        const hasTransform = p.rotation !== 0 || p.flipH || p.flipV;
+        // Disable smoothing so the tint keeps crisp pixel edges.
+        const prevSmoothing = ctx.imageSmoothingEnabled;
+        ctx.imageSmoothingEnabled = false;
+
+        if (hasTransform) {
+          ctx.save();
+          const cx = (p.col + sw / 2) * cellPx;
+          const cy = (p.row + sh / 2) * cellPx;
+          ctx.translate(cx, cy);
+          ctx.rotate((p.rotation * Math.PI) / 180);
+          if (p.flipH) ctx.scale(-1, 1);
+          if (p.flipV) ctx.scale(1, -1);
+          ctx.translate(-cx, -cy);
+          // Mirror drawAsset: when rotated 90/270, the mask (pre-rotation
+          // bounds) is centered within the rendered box so after the
+          // rotation it covers the rendered footprint exactly.
+          const drawCol = p.rotation === 90 || p.rotation === 270
+            ? p.col + (sw - info.spanW) / 2
+            : p.col;
+          const drawRow = p.rotation === 90 || p.rotation === 270
+            ? p.row + (sh - info.spanH) / 2
+            : p.row;
+          ctx.drawImage(
+            overlay,
+            drawCol * cellPx,
+            drawRow * cellPx,
+            info.spanW * cellPx,
+            info.spanH * cellPx,
+          );
+          ctx.restore();
+        } else {
+          ctx.drawImage(
+            overlay,
+            p.col * cellPx,
+            p.row * cellPx,
+            info.spanW * cellPx,
+            info.spanH * cellPx,
+          );
+        }
+        ctx.imageSmoothingEnabled = prevSmoothing;
       }
     }
 
@@ -649,7 +834,7 @@ export default function GridCanvas({
 
     ctx.restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, showNameplates]);
+  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
 
   // ── Camera follow active agent (read-only mode only) ─────────────────────
   // The camera target is *derived* from agent position (see `effectiveOffset`
@@ -1183,6 +1368,16 @@ export default function GridCanvas({
               e.preventDefault();
               onAgentContextMenu(hitId, e.clientX, e.clientY);
             }
+            return;
+          }
+          if (!readOnly && onPlacementContextMenu) {
+            const cell = toGrid(e.clientX, e.clientY);
+            if (!cell) return;
+            const hit = getPlacementAt?.(cell.row, cell.col) ?? null;
+            if (hit) {
+              e.preventDefault();
+              onPlacementContextMenu(hit, e.clientX, e.clientY);
+            }
           }
         }}
         style={{ display: 'block' }}
@@ -1203,6 +1398,25 @@ export default function GridCanvas({
           zIndex: 100,
         }}>
           Drag from Assets
+        </div>
+      )}
+      {readOnly && collisionDebug && (
+        <div style={{
+          position: 'absolute',
+          top: 12,
+          left: 12,
+          background: 'rgba(239, 83, 80, 0.92)',
+          color: '#fff',
+          padding: '6px 12px',
+          borderRadius: 6,
+          fontSize: 12,
+          fontWeight: 600,
+          pointerEvents: 'none',
+          zIndex: 50,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+          letterSpacing: 0.2,
+        }}>
+          COLLISION DEBUG &nbsp;·&nbsp; press C to hide
         </div>
       )}
       <ZoomNavigator

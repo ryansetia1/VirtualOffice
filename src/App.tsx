@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useGrid, createDefaultRoom } from './hooks/useGrid';
+import { useGrid, createDefaultRoom, type Placement } from './hooks/useGrid';
 import { useTool } from './hooks/useTool';
 import { useAssetCategories } from './hooks/useAssetCategories';
 import { useCustomAssets } from './hooks/useCustomAssets';
 import { useAgents } from './hooks/useAgents';
 import { useCollisionMasks } from './hooks/useCollisionMasks';
+import { useRenderOrderOverrides, type RenderOrder } from './hooks/useRenderOrderOverrides';
 import { preloadAllAssets } from './utils/imageLoader';
 import {
   preloadAllCharacters,
@@ -28,7 +29,10 @@ import LayersPanel from './components/LayersPanel';
 import LiveHeader from './components/LiveHeader';
 import AddAgentModal from './components/AddAgentModal';
 import ContextMenu, { type MenuItem } from './components/ContextMenu';
+import CollisionEditor from './components/CollisionEditor';
 import TerminalPanel, { FloatingTerminalWindow, TerminalView } from './components/TerminalPanel';
+import { getAssetTileInfo } from './data/assetManifest';
+import { getAutoMask } from './utils/pixelMasks';
 
 type AppTab = 'live' | 'build' | 'assets';
 
@@ -52,12 +56,31 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [liveZoom, setLiveZoom] = useState(1);
   const [activeTab, setActiveTab] = useState<AppTab>('build');
+  const [collisionDebug, setCollisionDebug] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(EMPTY_SET);
   const [hoveredIds, setHoveredIds] = useState<Set<string>>(EMPTY_SET);
   const [layersPanelCollapsed, setLayersPanelCollapsed] = useState(false);
   const [addAgentModal, setAddAgentModal] = useState<{ adoptFolder: string | null } | null>(null);
   const [orphanRefreshKey, setOrphanRefreshKey] = useState(0);
   const [agentCtx, setAgentCtx] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Collision editor target. `assetId` is always known; `placement` is only
+  // set when the editor was opened from build-tab (a specific instance).
+  // `scope` controls which mask is currently being edited — the user can flip
+  // it inside the editor to switch between placement-level and asset-level
+  // without closing the dialog.
+  const [collisionTarget, setCollisionTarget] = useState<
+    | { assetId: number; placement: Placement | null; scope: 'placement' | 'asset' }
+    | null
+  >(null);
+  const [placementCtx, setPlacementCtx] = useState<{
+    ids: Set<string>;
+    layer: 'floor' | 'wall' | 'object';
+    // First selected placement — used to target the collision editor when
+    // exactly one placement is selected.
+    placement: Placement | null;
+    x: number;
+    y: number;
+  } | null>(null);
   const [renameDialog, setRenameDialog] = useState<{ id: string; value: string } | null>(null);
   const [spriteDialog, setSpriteDialog] = useState<{ id: string } | null>(null);
   const [removeDialog, setRemoveDialog] = useState<{ id: string } | null>(null);
@@ -139,6 +162,7 @@ export default function App() {
   const { toolState, setMode, setDrawSubTool, setTool, setActiveLayer, selectAsset, rotateAsset, flipHAsset, flipVAsset, resetTransform } = useTool();
   const agentsApi = useAgents();
   const collisionApi = useCollisionMasks();
+  const renderOrderApi = useRenderOrderOverrides();
   const { customAssets, customAssetInfos, addCustomAssets, removeCustomAsset } = useCustomAssets();
   const customAssetIds = customAssets.map((a) => a.id);
   const {
@@ -211,6 +235,17 @@ export default function App() {
     setSelectedIds(EMPTY_SET);
   }, [removePlacementsByIds]);
 
+  // Keep placement-level overrides (collision masks + render order) in sync
+  // with the room. When a placement is removed (via delete, clear, undo,
+  // ungroup, etc.) we drop its saved entries so storage doesn't leak.
+  const prunePlacementMasks = collisionApi.prunePlacements;
+  const prunePlacementOrder = renderOrderApi.prunePlacements;
+  useEffect(() => {
+    const valid = new Set(room.placements.map((p) => p.id));
+    prunePlacementMasks(valid);
+    prunePlacementOrder(valid);
+  }, [room.placements, prunePlacementMasks, prunePlacementOrder]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -228,10 +263,21 @@ export default function App() {
         e.preventDefault();
         redo();
       }
+      // 'C' in live mode toggles the collision-debug overlay so users can
+      // *see* why an agent refuses to walk into an apparently-empty cell
+      // (usually: faint shadow pixels on an object asset).
+      if (
+        !e.metaKey && !e.ctrlKey && !e.altKey &&
+        (e.key === 'c' || e.key === 'C') &&
+        activeTab === 'live'
+      ) {
+        e.preventDefault();
+        setCollisionDebug((v) => !v);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [undo, redo]);
+  }, [undo, redo, activeTab]);
 
   // Snap trapped agents to nearest walkable cell when they become active
   // (e.g., if the room was edited while the agent was off-screen).
@@ -440,6 +486,9 @@ export default function App() {
               onActivateAgent={agentsApi.setActive}
               onOpenAgentTerminal={openAgentTerminal}
               onAgentContextMenu={(id, x, y) => setAgentCtx({ id, x, y })}
+              getRenderOrder={renderOrderApi.getOrder}
+              collisionDebug={collisionDebug}
+              getPlacementCollisionMask={collisionApi.getEffectiveMaskFor}
             />
           </div>
         </div>
@@ -504,6 +553,19 @@ export default function App() {
               onReorderGroups={reorderGroups}
               onAddPlacementsToGroup={addPlacementsToGroup}
               onRemovePlacementsFromGroup={removePlacementsFromGroup}
+              onEditCollision={(placementId) => {
+                const p = room.placements.find((pp) => pp.id === placementId);
+                if (p) setCollisionTarget({ assetId: p.assetId, placement: p, scope: 'placement' });
+              }}
+              renderOrderApi={{
+                getOrder: renderOrderApi.getOrder,
+                getAssetOrder: renderOrderApi.getAssetOrder,
+                hasPlacementOverride: renderOrderApi.hasPlacementOverride,
+                setPlacementOrder: renderOrderApi.setPlacementOrder,
+                setAssetOrder: renderOrderApi.setAssetOrder,
+                clearPlacementOverride: renderOrderApi.clearPlacementOverride,
+              }}
+              getPlacementById={(id) => room.placements.find((p) => p.id === id)}
               onModeChange={setMode}
               onToggleCollapsed={() => setLayersPanelCollapsed((v) => !v)}
             />
@@ -532,6 +594,25 @@ export default function App() {
               onRotate={rotateAsset}
               onFlipH={flipHAsset}
               onFlipV={flipVAsset}
+              getRenderOrder={renderOrderApi.getOrder}
+              onPlacementContextMenu={(placement, x, y) => {
+                // If the right-clicked placement is part of the current
+                // selection, act on the whole selection. Otherwise, select
+                // and target just the clicked placement.
+                const inSelection = selectedIds.has(placement.id);
+                const ids = inSelection ? new Set(selectedIds) : new Set([placement.id]);
+                if (!inSelection) setSelectedIds(ids);
+                const targetPlacements = room.placements.filter((p) => ids.has(p.id));
+                const firstLayer = targetPlacements[0]?.layer ?? placement.layer;
+                const sameLayer = targetPlacements.every((p) => p.layer === firstLayer);
+                setPlacementCtx({
+                  ids,
+                  layer: sameLayer ? firstLayer : placement.layer,
+                  placement: ids.size === 1 ? placement : null,
+                  x,
+                  y,
+                });
+              }}
             />
             <AssetPalette
               selectedAssetId={toolState.selectedAssetId}
@@ -688,6 +769,159 @@ export default function App() {
           }}
         />
       )}
+
+      {placementCtx && (() => {
+        const { ids, layer, placement, x, y } = placementCtx;
+        const items: MenuItem[] = [];
+        if (ids.size === 1 && placement) {
+          items.push({
+            label: 'Edit Collision…',
+            onClick: () => setCollisionTarget({ assetId: placement.assetId, placement, scope: 'placement' }),
+          });
+          if (collisionApi.isPlacementOverridden(placement.id)) {
+            items.push({
+              label: 'Reset collision to asset default',
+              onClick: () => collisionApi.clearPlacementMask(placement.id),
+            });
+          }
+          const effective = renderOrderApi.getOrder(placement);
+          const assetDefault = renderOrderApi.getAssetOrder(placement.assetId);
+          const hasPlacementOverride = renderOrderApi.hasPlacementOverride(placement.id);
+          // Per-placement render order — 3 radio-style entries. A filled dot
+          // marks the currently effective value. Clicking one writes the
+          // placement-level override.
+          const placementOrders: Array<{ value: RenderOrder; label: string }> = [
+            { value: 'auto', label: 'Auto (follow y-sort)' },
+            { value: 'above', label: 'Always above agent' },
+            { value: 'below', label: 'Always below agent' },
+          ];
+          for (const { value, label } of placementOrders) {
+            items.push({
+              label: `${effective === value ? '●' : '○'} ${label} — this object`,
+              onClick: () => renderOrderApi.setPlacementOrder(placement.id, value),
+            });
+          }
+          if (hasPlacementOverride) {
+            items.push({
+              label: 'Follow type default (clear per-object override)',
+              onClick: () => renderOrderApi.clearPlacementOverride(placement.id),
+            });
+          }
+          for (const { value, label } of placementOrders) {
+            items.push({
+              label: `${assetDefault === value ? '●' : '○'} ${label} — all of this type`,
+              onClick: () => renderOrderApi.setAssetOrder(placement.assetId, value),
+            });
+          }
+        }
+        if (ids.size > 1) {
+          items.push({
+            label: 'Group Selected',
+            onClick: () => createGroup('Group', layer, [...ids]),
+          });
+        }
+        items.push({
+          label: 'Delete',
+          danger: true,
+          onClick: () => handleDeletePlacements(ids),
+        });
+        return (
+          <ContextMenu
+            x={x}
+            y={y}
+            items={items}
+            onClose={() => setPlacementCtx(null)}
+          />
+        );
+      })()}
+
+      {collisionTarget !== null && (() => {
+        // Resolve the asset id (same for both scopes) and the source tiles /
+        // anchor used to composite the preview inside the editor.
+        const { assetId, placement, scope } = collisionTarget;
+        const custom = customAssets.find((a) => a.id === assetId);
+        let tiles: [number, number][];
+        let srcCol = 0;
+        let srcRow = 0;
+        if (custom) {
+          tiles = custom.tiles;
+        } else {
+          const override = tileOverrides[assetId];
+          if (override && override.length > 0) {
+            const minC = Math.min(...override.map((t) => t[0]));
+            const minR = Math.min(...override.map((t) => t[1]));
+            tiles = override;
+            srcCol = minC;
+            srcRow = minR;
+          } else {
+            const info = getAssetTileInfo(assetId);
+            tiles = info.tiles;
+            srcCol = info.srcCol;
+            srcRow = info.srcRow;
+          }
+        }
+        // Scope toggle is available only when a specific placement is known
+        // (i.e., the editor was opened from build-tab context menu).
+        const scopeControl = placement
+          ? {
+              scope,
+              onScopeChange: (next: 'placement' | 'asset') => {
+                setCollisionTarget((prev) => (prev ? { ...prev, scope: next } : prev));
+              },
+            }
+          : undefined;
+        if (scope === 'asset') {
+          // Asset-level edit: start from the current asset mask; reset falls
+          // back to the auto mask.
+          const effective = collisionApi.getMask(assetId) ?? undefined;
+          const auto = getAutoMask(assetId);
+          return (
+            <CollisionEditor
+              // Remount when scope flips so the in-memory painting is replaced
+              // with the scope's freshly resolved initial mask.
+              key={`asset:${assetId}`}
+              assetId={assetId}
+              displayName={getAssetDisplayName(assetId)}
+              initialMask={effective}
+              autoMask={auto}
+              hasOverride={collisionApi.isOverridden(assetId)}
+              tiles={tiles}
+              srcCol={srcCol}
+              srcRow={srcRow}
+              onSave={(m) => collisionApi.setMask(assetId, m)}
+              onReset={() => collisionApi.clearMask(assetId)}
+              onClose={() => setCollisionTarget(null)}
+              scopeControl={scopeControl}
+            />
+          );
+        }
+        // Placement-level edit: start from this placement's override if any,
+        // else the asset-effective mask. "Auto mask" for the editor's reset
+        // button becomes the asset-effective mask, so "reset" means "fall
+        // back to the asset default".
+        if (!placement) return null;
+        const placementId = placement.id;
+        const placementOverride = collisionApi.getPlacementOverrideMask(placementId);
+        const assetEffective = collisionApi.getMask(assetId);
+        const initial = placementOverride ?? assetEffective ?? undefined;
+        return (
+          <CollisionEditor
+            key={`placement:${placementId}`}
+            assetId={assetId}
+            displayName={`${getAssetDisplayName(assetId)} — this object only`}
+            initialMask={initial}
+            autoMask={assetEffective ?? undefined}
+            hasOverride={collisionApi.isPlacementOverridden(placementId)}
+            tiles={tiles}
+            srcCol={srcCol}
+            srcRow={srcRow}
+            onSave={(m) => collisionApi.setPlacementMask(placementId, m)}
+            onReset={() => collisionApi.clearPlacementMask(placementId)}
+            onClose={() => setCollisionTarget(null)}
+            scopeControl={scopeControl}
+          />
+        );
+      })()}
 
       {agentCtx && (() => {
         const agent = agentsApi.agents.find((a) => a.id === agentCtx.id);

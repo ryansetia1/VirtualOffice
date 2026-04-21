@@ -34,6 +34,21 @@ interface Props {
   onReorderGroups: (orderedGroupIds: string[]) => void;
   onAddPlacementsToGroup: (groupId: string, placementIds: string[]) => void;
   onRemovePlacementsFromGroup: (placementIds: string[]) => void;
+  /** Opens the per-placement collision editor for the given placement. */
+  onEditCollision?: (placementId: string) => void;
+  /** Render-order (auto/above/below-agent) API. Passed through from App so
+   *  the Layers panel context menu can mirror the canvas right-click menu. */
+  renderOrderApi?: {
+    getOrder: (p: { id: string; assetId: number }) => 'auto' | 'above' | 'below';
+    getAssetOrder: (assetId: number) => 'auto' | 'above' | 'below';
+    hasPlacementOverride: (placementId: string) => boolean;
+    setPlacementOrder: (placementId: string, order: 'auto' | 'above' | 'below') => void;
+    setAssetOrder: (assetId: number, order: 'auto' | 'above' | 'below') => void;
+    clearPlacementOverride: (placementId: string) => void;
+  };
+  /** Resolves a placement id → placement. Used by the Layers panel context
+   *  menu to look up asset ids for asset-scoped actions. */
+  getPlacementById?: (id: string) => { id: string; assetId: number } | undefined;
   onModeChange?: (mode: 'select' | 'draw' | 'place') => void;
   onToggleCollapsed: () => void;
 }
@@ -73,6 +88,9 @@ export default function LayersPanel({
   onReorderGroups,
   onAddPlacementsToGroup,
   onRemovePlacementsFromGroup,
+  onEditCollision,
+  renderOrderApi,
+  getPlacementById,
   onModeChange,
   onToggleCollapsed,
 }: Props) {
@@ -282,6 +300,37 @@ export default function LayersPanel({
     const items: MenuItem[] = [];
     if (targetIds.size === 1) {
       const singleId = [...targetIds][0];
+      const singlePlacement = getPlacementById?.(singleId);
+      if (onEditCollision) {
+        items.push({ label: 'Edit Collision…', onClick: () => onEditCollision(singleId) });
+      }
+      if (renderOrderApi && singlePlacement) {
+        const effective = renderOrderApi.getOrder(singlePlacement);
+        const assetDefault = renderOrderApi.getAssetOrder(singlePlacement.assetId);
+        const orders: Array<{ value: 'auto' | 'above' | 'below'; label: string }> = [
+          { value: 'auto', label: 'Auto (follow y-sort)' },
+          { value: 'above', label: 'Always above agent' },
+          { value: 'below', label: 'Always below agent' },
+        ];
+        for (const { value, label } of orders) {
+          items.push({
+            label: `${effective === value ? '●' : '○'} ${label} — this object`,
+            onClick: () => renderOrderApi.setPlacementOrder(singleId, value),
+          });
+        }
+        if (renderOrderApi.hasPlacementOverride(singleId)) {
+          items.push({
+            label: 'Follow type default (clear per-object override)',
+            onClick: () => renderOrderApi.clearPlacementOverride(singleId),
+          });
+        }
+        for (const { value, label } of orders) {
+          items.push({
+            label: `${assetDefault === value ? '●' : '○'} ${label} — all of this type`,
+            onClick: () => renderOrderApi.setAssetOrder(singlePlacement.assetId, value),
+          });
+        }
+      }
       items.push({ label: 'Bring to Front', onClick: () => onBringToFront(singleId) });
       items.push({ label: 'Send to Back', onClick: () => onSendToBack(singleId) });
     }
@@ -299,7 +348,7 @@ export default function LayersPanel({
     }
     items.push({ label: 'Delete', danger: true, onClick: () => onDeletePlacements(targetIds) });
     setCtxMenu({ x: e.clientX, y: e.clientY, items });
-  }, [selectedIds, room.layerNames, onBringToFront, onSendToBack, onMovePlacementsToLayer, onCreateGroup, onDeletePlacements]);
+  }, [selectedIds, room.layerNames, onEditCollision, renderOrderApi, getPlacementById, onBringToFront, onSendToBack, onMovePlacementsToLayer, onCreateGroup, onDeletePlacements]);
 
   const openGroupCtx = useCallback((e: React.MouseEvent, groupId: string) => {
     e.preventDefault();
@@ -328,6 +377,15 @@ export default function LayersPanel({
   }, [groupMap, room.layerNames, onUngroupPlacements, onDeleteGroup, onMoveGroupToLayer, onDuplicateGroup, onModeChange, onSetSelectedIds]);
 
   // ── Pointer-based drag reorder ─────────────────────────────────────────
+  // NOTE: We intentionally do NOT call `setPointerCapture` on pointerdown.
+  // Capturing the pointer causes the browser to retarget subsequent `click`
+  // and `dblclick` events to the capturing element, which breaks the
+  // double-click-to-rename handler attached to the inner `<span>`. Instead,
+  // capture is taken lazily inside `handleDragPointerMove` once the drag
+  // threshold has been crossed — a real drag is underway at that point, and
+  // the follow-up pointerup naturally maps to a drop (not a click).
+  const pendingCaptureRef = useRef<{ el: HTMLElement; pointerId: number } | null>(null);
+
   const handleDragPointerDown = useCallback((e: RPointerEvent<HTMLDivElement>, placementId: string) => {
     if (e.button !== 0) return;
     const ids = selectedIds.has(placementId) && selectedIds.size > 1 ? new Set(selectedIds) : new Set([placementId]);
@@ -335,7 +393,7 @@ export default function LayersPanel({
     setDragGroupId(null);
     setIsDragActive(false);
     dragStartPos.current = { x: e.clientX, y: e.clientY };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    pendingCaptureRef.current = { el: e.currentTarget as HTMLElement, pointerId: e.pointerId };
   }, [selectedIds]);
 
   const handleGroupDragPointerDown = useCallback((e: RPointerEvent<HTMLDivElement>, groupId: string) => {
@@ -344,7 +402,7 @@ export default function LayersPanel({
     setDragIds(null);
     setIsDragActive(false);
     dragStartPos.current = { x: e.clientX, y: e.clientY };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    pendingCaptureRef.current = { el: e.currentTarget as HTMLElement, pointerId: e.pointerId };
   }, []);
 
   const handleDragPointerMove = useCallback((e: RPointerEvent<HTMLDivElement>) => {
@@ -358,6 +416,13 @@ export default function LayersPanel({
       const dy = e.clientY - dragStartPos.current.y;
       if (Math.sqrt(dx * dx + dy * dy) < DRAG_THRESHOLD) return;
       setIsDragActive(true);
+      // Now that a real drag has started, claim pointer capture so we still
+      // receive move/up events if the pointer leaves the drag source element.
+      const pending = pendingCaptureRef.current;
+      if (pending) {
+        try { pending.el.setPointerCapture(pending.pointerId); } catch { /* ignore */ }
+        pendingCaptureRef.current = null;
+      }
     }
 
     // Cross-layer move: dropping on a layer header.
@@ -478,6 +543,7 @@ export default function LayersPanel({
       setDragGroupId(null);
       setIsDragActive(false);
       dragStartPos.current = null;
+      pendingCaptureRef.current = null;
       setInsertIndicator(null);
       setInsertTargetId(null);
       setInsertTargetKind(null);
@@ -848,7 +914,8 @@ export default function LayersPanel({
             />
           ) : (
             <span
-              style={{ ...styles.groupName, ...(isGroupSelected ? { color: 'var(--accent)' } : {}) }}
+              style={{ ...styles.groupName, cursor: 'text', ...(isGroupSelected ? { color: 'var(--accent)' } : {}) }}
+              title="Double-click to rename"
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 setRenamingGroup(g.id);

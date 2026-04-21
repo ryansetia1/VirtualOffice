@@ -18,7 +18,9 @@ export interface ToolState {
 
 export function useTool() {
   const [toolState, setToolState] = useState<ToolState>({
-    mode: 'draw',
+    // Start in 'select' so the user can't accidentally paint/erase/place
+    // before they've chosen a tool.
+    mode: 'select',
     tool: 'paint',
     drawSubTool: 'brush',
     activeLayer: 'object',

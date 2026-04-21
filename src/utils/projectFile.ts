@@ -10,11 +10,27 @@ const KEYS = [
   'virtualOffice_customAssets',
   'virtualOffice_agents',
   // Current: pixel-mask collision overrides (painted in the Collision Editor).
+  // Asset-level default masks (apply to every placement of an asset).
   'virtualOffice_collisionMasks',
+  // Per-placement collision masks (override the asset default for a single
+  // instance). Keyed by placement id, so they only make sense alongside the
+  // room payload above.
+  'virtualOffice_placementMasks',
   // Legacy walkable/blocking toggle — still bundled so old project files and
   // half-migrated installs round-trip cleanly. `useCollisionMasks` migrates
   // these into mask form on first load and removes the key.
   'virtualOffice_blockingOverrides',
+  // Render-order overrides. Each entry is `'above' | 'below'` (absence = the
+  // implicit `'auto'` value, following normal y-sort vs the agent's foot
+  // row). Asset-level applies to every placement of an asset; placement-
+  // level is a per-instance override that wins over the asset default.
+  'virtualOffice_assetRenderOrder',
+  'virtualOffice_placementRenderOrder',
+  // Legacy above-agent flag keys — kept here so old project files still
+  // round-trip cleanly. `useRenderOrderOverrides` migrates these into the
+  // new storage on first load and removes them.
+  'virtualOffice_assetAboveAgent',
+  'virtualOffice_placementAboveAgent',
 ] as const;
 
 const FILE_HEADER = 'virtualOffice_project';
