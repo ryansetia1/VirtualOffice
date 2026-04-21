@@ -133,7 +133,7 @@ export default function App() {
     toggleLayerVisibility, toggleLayerLock, renameLayer,
     bringToFront, sendToBack, movePlacementToLayer, movePlacementsToLayer, reorderPlacement, reorderPlacementsBulk,
     createGroup, duplicateGroup, ungroupPlacements, deleteGroup, renameGroup,
-    toggleGroupVisibility, toggleGroupLock, toggleGroupCollapsed, reorderGroups, moveGroupToLayer, addPlacementsToGroup,
+    toggleGroupVisibility, toggleGroupLock, toggleGroupCollapsed, reorderGroups, moveGroupToLayer, addPlacementsToGroup, removePlacementsFromGroup,
     bulkMovePlacements, bulkDuplicatePlacements,
   } = useGrid(initialRoom);
   const { toolState, setMode, setDrawSubTool, setTool, setActiveLayer, selectAsset, rotateAsset, flipHAsset, flipVAsset, resetTransform } = useTool();
@@ -503,6 +503,7 @@ export default function App() {
               onMoveGroupToLayer={moveGroupToLayer}
               onReorderGroups={reorderGroups}
               onAddPlacementsToGroup={addPlacementsToGroup}
+              onRemovePlacementsFromGroup={removePlacementsFromGroup}
               onModeChange={setMode}
               onToggleCollapsed={() => setLayersPanelCollapsed((v) => !v)}
             />

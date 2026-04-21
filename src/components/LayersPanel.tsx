@@ -33,6 +33,7 @@ interface Props {
   onMoveGroupToLayer: (groupId: string, layer: LayerType) => void;
   onReorderGroups: (orderedGroupIds: string[]) => void;
   onAddPlacementsToGroup: (groupId: string, placementIds: string[]) => void;
+  onRemovePlacementsFromGroup: (placementIds: string[]) => void;
   onModeChange?: (mode: 'select' | 'draw' | 'place') => void;
   onToggleCollapsed: () => void;
 }
@@ -71,6 +72,7 @@ export default function LayersPanel({
   onMoveGroupToLayer,
   onReorderGroups,
   onAddPlacementsToGroup,
+  onRemovePlacementsFromGroup,
   onModeChange,
   onToggleCollapsed,
 }: Props) {
@@ -88,11 +90,12 @@ export default function LayersPanel({
   const [isDragActive, setIsDragActive] = useState(false);
   const [insertIndicator, setInsertIndicator] = useState<{ y: number } | null>(null);
   const [insertTargetId, setInsertTargetId] = useState<string | null>(null);
+  // 'placement' = anchor is a placement row; 'group' = anchor is a group
+  // header (dragged item is inserted before/after the whole group block).
+  const [insertTargetKind, setInsertTargetKind] = useState<'placement' | 'group' | null>(null);
   const [insertAbove, setInsertAbove] = useState(true);
   const [dropTargetLayer, setDropTargetLayer] = useState<LayerType | null>(null);
   const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
-  const [insertGroupTargetId, setInsertGroupTargetId] = useState<string | null>(null);
-  const [insertGroupAbove, setInsertGroupAbove] = useState(true);
   const dragStartPos = useRef<{ x: number; y: number } | null>(null);
   const DRAG_THRESHOLD = 5;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -112,33 +115,67 @@ export default function LayersPanel({
   const groups = useMemo(() => room.groups ?? [], [room.groups]);
   const groupMap = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups]);
 
-  // Build sorted placements per layer, split by group
-  const dataByLayer = useMemo(() => {
-    const result: Record<LayerType, { grouped: Map<string, Placement[]>; ungrouped: Placement[] }> = {
-      floor: { grouped: new Map(), ungrouped: [] },
-      wall: { grouped: new Map(), ungrouped: [] },
-      object: { grouped: new Map(), ungrouped: [] },
-    };
-    const sortFn = (a: Placement, b: Placement) => {
-      const za = a.zIndex ?? (a.row + a.spanH) * 1000;
-      const zb = b.zIndex ?? (b.row + b.spanH) * 1000;
-      return zb - za;
+  // Effective zIndex helper (shared).
+  const zOf = useCallback((p: Placement): number => {
+    return p.zIndex ?? (p.row + p.spanH) * 1000;
+  }, []);
+
+  // Interleaved per-layer panel entries. Each layer is a single ordered list
+  // of "entries" sorted by effective zIndex desc; an entry is either a group
+  // (with its members, kept in z-desc order for render under the header) or a
+  // single ungrouped placement. A group's effective z = max member z so that
+  // an ungrouped placement with higher z than a group's topmost member slots
+  // above the group, matching the canvas draw order.
+  type GroupEntry = { kind: 'group'; group: PlacementGroup; members: Placement[]; effectiveZ: number };
+  type PlaceEntry = { kind: 'placement'; placement: Placement; effectiveZ: number };
+  type PanelEntry = GroupEntry | PlaceEntry;
+
+  const entriesByLayer = useMemo(() => {
+    const groupMembers = new Map<string, Placement[]>();
+    const ungroupedByLayer: Record<LayerType, Placement[]> = {
+      floor: [], wall: [], object: [],
     };
     for (const p of room.placements) {
-      const bucket = result[p.layer];
       if (p.groupId && groupMap.has(p.groupId)) {
-        if (!bucket.grouped.has(p.groupId)) bucket.grouped.set(p.groupId, []);
-        bucket.grouped.get(p.groupId)!.push(p);
+        if (!groupMembers.has(p.groupId)) groupMembers.set(p.groupId, []);
+        groupMembers.get(p.groupId)!.push(p);
       } else {
-        bucket.ungrouped.push(p);
+        ungroupedByLayer[p.layer].push(p);
       }
     }
+    const result: Record<LayerType, PanelEntry[]> = { floor: [], wall: [], object: [] };
     for (const layer of LAYER_ORDER_REVERSED) {
-      result[layer].ungrouped.sort(sortFn);
-      for (const arr of result[layer].grouped.values()) arr.sort(sortFn);
+      const entries: PanelEntry[] = [];
+      for (const g of groups) {
+        if (g.layer !== layer) continue;
+        const members = (groupMembers.get(g.id) ?? []).slice().sort((a, b) => zOf(b) - zOf(a));
+        const effectiveZ = members.length > 0
+          ? Math.max(...members.map(zOf))
+          : Number.NEGATIVE_INFINITY;
+        entries.push({ kind: 'group', group: g, members, effectiveZ });
+      }
+      for (const p of ungroupedByLayer[layer]) {
+        entries.push({ kind: 'placement', placement: p, effectiveZ: zOf(p) });
+      }
+      entries.sort((a, b) => b.effectiveZ - a.effectiveZ);
+      result[layer] = entries;
     }
     return result;
-  }, [room.placements, groupMap]);
+  }, [room.placements, groupMap, groups, zOf]);
+
+  // Flatten a layer's entries into a placement-ID sequence. Group members
+  // stay contiguous (group block), in their current z-desc order.
+  const flattenEntriesToPlacementIds = useCallback((entries: PanelEntry[]): string[] => {
+    const ids: string[] = [];
+    for (const entry of entries) {
+      if (entry.kind === 'group') {
+        for (const m of entry.members) ids.push(m.id);
+      } else {
+        ids.push(entry.placement.id);
+      }
+    }
+    return ids;
+  }, []);
 
   // Build unique display names: append "#N" when multiple placements share the same asset name
   const placementDisplayNames = useMemo(() => {
@@ -163,23 +200,23 @@ export default function LayersPanel({
     return nameMap;
   }, [room.placements, getAssetDisplayName]);
 
-  // Flat list of all placement IDs in display order (for Shift+click range selection)
+  // Flat list of all visible placement IDs in display order (for Shift+click range selection).
   const flatPlacementIds = useMemo(() => {
     const ids: string[] = [];
     for (const layer of LAYER_ORDER_REVERSED) {
       if (layerCollapsed[layer]) continue;
-      const data = dataByLayer[layer];
-      const layerGroups = groups.filter((g) => g.layer === layer);
-      for (const g of layerGroups) {
-        if (!g.collapsed) {
-          const gPlacements = data.grouped.get(g.id) ?? [];
-          for (const p of gPlacements) ids.push(p.id);
+      for (const entry of entriesByLayer[layer]) {
+        if (entry.kind === 'group') {
+          if (!entry.group.collapsed) {
+            for (const p of entry.members) ids.push(p.id);
+          }
+        } else {
+          ids.push(entry.placement.id);
         }
       }
-      for (const p of data.ungrouped) ids.push(p.id);
     }
     return ids;
-  }, [dataByLayer, groups, layerCollapsed]);
+  }, [entriesByLayer, layerCollapsed]);
 
   // Selection handlers
   // Shift+click = range select, Ctrl/Cmd+click = toggle individual
@@ -314,7 +351,7 @@ export default function LayersPanel({
     const hasDragIntent = dragIds || dragGroupId;
     if (!hasDragIntent) return;
 
-    // Check if past drag threshold
+    // Check if past drag threshold.
     if (!isDragActive) {
       if (!dragStartPos.current) return;
       const dx = e.clientX - dragStartPos.current.x;
@@ -323,7 +360,7 @@ export default function LayersPanel({
       setIsDragActive(true);
     }
 
-    // Check layer headers first -- for cross-layer move
+    // Cross-layer move: dropping on a layer header.
     for (const [layer, el] of layerHeaderRefs.current.entries()) {
       const rect = el.getBoundingClientRect();
       if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
@@ -331,153 +368,349 @@ export default function LayersPanel({
         setDropTargetGroupId(null);
         setInsertIndicator(null);
         setInsertTargetId(null);
-        setInsertGroupTargetId(null);
+        setInsertTargetKind(null);
         return;
       }
     }
     setDropTargetLayer(null);
 
-    // For placement drags, check group headers as drop targets
-    if (dragIds) {
-      for (const [gid, el] of groupHeaderRefs.current.entries()) {
-        const rect = el.getBoundingClientRect();
-        if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
-          setDropTargetGroupId(gid);
-          setInsertIndicator(null);
-          setInsertTargetId(null);
-          return;
-        }
+    // First try: pointer *inside* a group header. Group headers get three
+    // zones — top (insert above group block), middle (insert into group —
+    // placement drag only), bottom (insert below group block).
+    for (const [gid, el] of groupHeaderRefs.current.entries()) {
+      const rect = el.getBoundingClientRect();
+      if (e.clientY < rect.top || e.clientY > rect.bottom) continue;
+      if (dragGroupId === gid) continue; // can't drop onto itself
+      const h = rect.height;
+      const edgeZone = Math.max(6, h * 0.3);
+      const relY = e.clientY - rect.top;
+      if (relY <= edgeZone) {
+        setInsertIndicator({ y: rect.top });
+        setInsertTargetId(gid);
+        setInsertTargetKind('group');
+        setInsertAbove(true);
+        setDropTargetGroupId(null);
+        return;
       }
+      if (relY >= h - edgeZone) {
+        setInsertIndicator({ y: rect.bottom });
+        setInsertTargetId(gid);
+        setInsertTargetKind('group');
+        setInsertAbove(false);
+        setDropTargetGroupId(null);
+        return;
+      }
+      // Middle zone: only makes sense for placement drags (add into group).
+      if (dragIds) {
+        setDropTargetGroupId(gid);
+        setInsertIndicator(null);
+        setInsertTargetId(null);
+        setInsertTargetKind(null);
+      } else {
+        // Group drag over group body middle — fall back to above/below based on midpoint.
+        const above = e.clientY < rect.top + h / 2;
+        setInsertIndicator({ y: above ? rect.top : rect.bottom });
+        setInsertTargetId(gid);
+        setInsertTargetKind('group');
+        setInsertAbove(above);
+        setDropTargetGroupId(null);
+      }
+      return;
     }
     setDropTargetGroupId(null);
 
-    // For group drag, check other group headers for insertion ordering
-    if (dragGroupId) {
-      let closestGroup: { id: string; above: boolean; lineY: number } | null = null;
-      let minGroupDist = Infinity;
-      for (const [gid, el] of groupHeaderRefs.current.entries()) {
-        if (gid === dragGroupId) continue;
-        const rect = el.getBoundingClientRect();
-        const midY = rect.top + rect.height / 2;
-        const dist = Math.abs(e.clientY - midY);
-        if (dist < minGroupDist) {
-          minGroupDist = dist;
-          const above = e.clientY < midY;
-          closestGroup = { id: gid, above, lineY: above ? rect.top : rect.bottom };
-        }
-      }
-      if (closestGroup) {
-        setInsertIndicator({ y: closestGroup.lineY });
-        setInsertGroupTargetId(closestGroup.id);
-        setInsertGroupAbove(closestGroup.above);
-      } else {
-        setInsertIndicator(null);
-        setInsertGroupTargetId(null);
-      }
-      setInsertTargetId(null);
+    // Pointer *inside* a placement row.
+    for (const [id, el] of itemRefs.current.entries()) {
+      if (dragIds && dragIds.has(id)) continue;
+      const rect = el.getBoundingClientRect();
+      if (e.clientY < rect.top || e.clientY > rect.bottom) continue;
+      const midY = rect.top + rect.height / 2;
+      const above = e.clientY < midY;
+      setInsertIndicator({ y: above ? rect.top : rect.bottom });
+      setInsertTargetId(id);
+      setInsertTargetKind('placement');
+      setInsertAbove(above);
       return;
     }
 
-    // Find closest placement item and determine above/below
-    let closest: { id: string; above: boolean; lineY: number } | null = null;
+    // Not over any row: pick nearest anchor by midY (groups + placements).
+    let closest: { id: string; kind: 'placement' | 'group'; above: boolean; lineY: number } | null = null;
     let minDist = Infinity;
     for (const [id, el] of itemRefs.current.entries()) {
-      if (dragIds!.has(id)) continue;
+      if (dragIds && dragIds.has(id)) continue;
       const rect = el.getBoundingClientRect();
       const midY = rect.top + rect.height / 2;
       const dist = Math.abs(e.clientY - midY);
       if (dist < minDist) {
         minDist = dist;
         const above = e.clientY < midY;
-        closest = { id, above, lineY: above ? rect.top : rect.bottom };
+        closest = { id, kind: 'placement', above, lineY: above ? rect.top : rect.bottom };
+      }
+    }
+    for (const [gid, el] of groupHeaderRefs.current.entries()) {
+      if (dragGroupId === gid) continue;
+      const rect = el.getBoundingClientRect();
+      const midY = rect.top + rect.height / 2;
+      const dist = Math.abs(e.clientY - midY);
+      if (dist < minDist) {
+        minDist = dist;
+        const above = e.clientY < midY;
+        closest = { id: gid, kind: 'group', above, lineY: above ? rect.top : rect.bottom };
       }
     }
     if (closest) {
       setInsertIndicator({ y: closest.lineY });
       setInsertTargetId(closest.id);
+      setInsertTargetKind(closest.kind);
       setInsertAbove(closest.above);
     } else {
       setInsertIndicator(null);
       setInsertTargetId(null);
+      setInsertTargetKind(null);
     }
   }, [dragIds, dragGroupId, isDragActive]);
 
   const handleDragPointerUp = useCallback((_e: RPointerEvent<HTMLDivElement>) => {
     const wasActive = isDragActive;
 
-    // Handle group drag
-    if (dragGroupId) {
-      if (wasActive && dropTargetLayer) {
-        onMoveGroupToLayer(dragGroupId, dropTargetLayer);
-      } else if (wasActive && insertGroupTargetId) {
-        const groups = room.groups ?? [];
-        const targetGroup = groups.find((g) => g.id === insertGroupTargetId);
-        const dragGroup = groups.find((g) => g.id === dragGroupId);
-        if (targetGroup && dragGroup) {
-          const sameLayerGroups = groups.filter((g) => g.layer === targetGroup.layer);
-          const otherIds = sameLayerGroups.filter((g) => g.id !== dragGroupId).map((g) => g.id);
-          const targetIdx = otherIds.indexOf(insertGroupTargetId);
-          const insertAt = insertGroupAbove ? targetIdx : targetIdx + 1;
-          otherIds.splice(insertAt, 0, dragGroupId);
-          if (dragGroup.layer !== targetGroup.layer) {
-            onMoveGroupToLayer(dragGroupId, targetGroup.layer);
-          }
-          onReorderGroups(otherIds);
-        }
-      }
+    const resetState = () => {
+      setDragIds(null);
       setDragGroupId(null);
       setIsDragActive(false);
       dragStartPos.current = null;
       setInsertIndicator(null);
       setInsertTargetId(null);
-      setInsertGroupTargetId(null);
+      setInsertTargetKind(null);
       setDropTargetLayer(null);
       setDropTargetGroupId(null);
+    };
+
+    // Resolve the anchor's layer and position within the current entries list
+    // for that layer. Returns null if anchor is stale.
+    const resolveAnchor = (): { layer: LayerType; anchorIdx: number } | null => {
+      if (!insertTargetId || !insertTargetKind) return null;
+      if (insertTargetKind === 'group') {
+        const g = (room.groups ?? []).find((g) => g.id === insertTargetId);
+        if (!g) return null;
+        const entries = entriesByLayer[g.layer];
+        const idx = entries.findIndex((e) => e.kind === 'group' && e.group.id === insertTargetId);
+        return idx >= 0 ? { layer: g.layer, anchorIdx: idx } : null;
+      }
+      const p = room.placements.find((p) => p.id === insertTargetId);
+      if (!p) return null;
+      const entries = entriesByLayer[p.layer];
+      // If the anchor placement is a group member, its row's *parent* entry is
+      // the group. We resolve to the group's entry index so the dragged item
+      // slots either side of the whole group block.
+      if (p.groupId) {
+        const gi = entries.findIndex((e) => e.kind === 'group' && e.group.id === p.groupId);
+        return gi >= 0 ? { layer: p.layer, anchorIdx: gi } : null;
+      }
+      const idx = entries.findIndex((e) => e.kind === 'placement' && e.placement.id === insertTargetId);
+      return idx >= 0 ? { layer: p.layer, anchorIdx: idx } : null;
+    };
+
+    // ── Group drag ────────────────────────────────────────────────────────
+    if (dragGroupId) {
+      if (wasActive && dropTargetLayer) {
+        onMoveGroupToLayer(dragGroupId, dropTargetLayer);
+      } else if (wasActive) {
+        const anchor = resolveAnchor();
+        const dragGroup = (room.groups ?? []).find((g) => g.id === dragGroupId);
+        if (anchor && dragGroup) {
+          const { layer: targetLayer, anchorIdx } = anchor;
+          const entries = entriesByLayer[targetLayer];
+
+          // Build the new entries list: remove the dragged group entry (if it
+          // currently lives in this layer) and re-insert at anchor position.
+          const dragEntry = entries.find(
+            (e) => e.kind === 'group' && e.group.id === dragGroupId,
+          );
+          const withoutDrag = entries.filter(
+            (e) => !(e.kind === 'group' && e.group.id === dragGroupId),
+          );
+          // The dragged group may be in a different layer (cross-layer move).
+          const members = dragEntry
+            ? (dragEntry as GroupEntry).members
+            : room.placements
+                .filter((p) => p.groupId === dragGroupId)
+                .sort((a, b) => zOf(b) - zOf(a));
+          const newGroupEntry: GroupEntry = {
+            kind: 'group',
+            group: { ...dragGroup, layer: targetLayer },
+            members,
+            effectiveZ: 0,
+          };
+          const adjustedIdx = dragEntry
+            ? (entries.indexOf(dragEntry) < anchorIdx ? anchorIdx - 1 : anchorIdx)
+            : anchorIdx;
+          const insertAt = insertAbove ? adjustedIdx : adjustedIdx + 1;
+          withoutDrag.splice(insertAt, 0, newGroupEntry);
+
+          if (dragGroup.layer !== targetLayer) {
+            onMoveGroupToLayer(dragGroupId, targetLayer);
+          }
+
+          // Emit new groups-array ordering (for metadata) and new layer z-order.
+          const newLayerGroupIds = withoutDrag
+            .filter((e): e is GroupEntry => e.kind === 'group')
+            .map((e) => e.group.id);
+          onReorderGroups(newLayerGroupIds);
+          onReorderPlacementsBulk(flattenEntriesToPlacementIds(withoutDrag));
+        }
+      }
+      resetState();
       return;
     }
 
-    if (!dragIds) return;
+    // ── Placement drag ────────────────────────────────────────────────────
+    if (!dragIds) {
+      resetState();
+      return;
+    }
 
     if (wasActive && dropTargetGroupId) {
+      // "Drop into group" — addPlacementsToGroup re-parents regardless of
+      // previous group membership (it also syncs the layer).
       onAddPlacementsToGroup(dropTargetGroupId, [...dragIds]);
     } else if (wasActive && dropTargetLayer) {
       onMovePlacementsToLayer(dragIds, dropTargetLayer);
-    } else if (wasActive && insertTargetId) {
-      const targetP = room.placements.find((p) => p.id === insertTargetId);
-      if (targetP) {
-        const layer = targetP.layer;
-        const sortFn = (a: Placement, b: Placement) => {
-          const za = a.zIndex ?? (a.row + a.spanH) * 1000;
-          const zb = b.zIndex ?? (b.row + b.spanH) * 1000;
-          return zb - za;
-        };
-        const layerPlacements = room.placements
-          .filter((p) => p.layer === layer)
-          .sort(sortFn);
-        const orderedIds = layerPlacements.map((p) => p.id);
+    } else if (wasActive) {
+      const anchor = resolveAnchor();
+      if (anchor) {
+        const { layer: targetLayer, anchorIdx } = anchor;
+        const entries = entriesByLayer[targetLayer];
 
-        const draggedIds = [...dragIds].filter((id) => orderedIds.includes(id));
-        const filtered = orderedIds.filter((id) => !dragIds.has(id));
+        const draggedPlacements = [...dragIds]
+          .map((id) => room.placements.find((p) => p.id === id))
+          .filter((p): p is Placement => !!p)
+          .sort((a, b) => zOf(b) - zOf(a));
 
-        const targetIdx = filtered.indexOf(insertTargetId);
-        if (targetIdx >= 0) {
-          const insertIdx = insertAbove ? targetIdx : targetIdx + 1;
-          filtered.splice(insertIdx, 0, ...draggedIds);
+        // Decide whether dragged placements should leave their current
+        // group(s). Rules:
+        //  - Reorder *inside the same group* only when the anchor is a
+        //    placement AND every dragged placement shares that placement's
+        //    groupId (so it's clearly "sort within this group"). In that
+        //    case we keep the membership.
+        //  - Any other drop (above/below a group header, above/below an
+        //    ungrouped placement, above/below a placement in a different
+        //    group) => dragged placements leave their current group and
+        //    become standalone items at the new position.
+        let shouldUngroup = true;
+        if (insertTargetKind === 'placement') {
+          const anchorP = room.placements.find((p) => p.id === insertTargetId);
+          if (
+            anchorP &&
+            anchorP.groupId &&
+            draggedPlacements.every((p) => p.groupId === anchorP.groupId)
+          ) {
+            shouldUngroup = false;
+          }
         }
 
-        onReorderPlacementsBulk(filtered);
+        // Cross-layer move (clears groupId + zIndex as a side effect).
+        const needsLayerMove = draggedPlacements.some((p) => p.layer !== targetLayer);
+
+        // Perform membership / layer changes before the bulk reorder so
+        // reorderPlacementsBulk works against an up-to-date placement set.
+        if (needsLayerMove) {
+          onMovePlacementsToLayer(dragIds, targetLayer);
+        } else if (shouldUngroup) {
+          const toUngroup = draggedPlacements
+            .filter((p) => p.groupId !== undefined)
+            .map((p) => p.id);
+          if (toUngroup.length > 0) {
+            onRemovePlacementsFromGroup(toUngroup);
+          }
+        }
+
+        // Build the new entries list. In the "reorder inside the same group"
+        // path we just rearrange group members (zIndex only; no top-level
+        // entry changes) and fall through via the flattener. In all other
+        // cases, dragged items become top-level placement entries.
+        const dragSet = dragIds;
+
+        let withoutDrag: PanelEntry[];
+        let insertAt: number;
+        let draggedEntries: PlaceEntry[];
+
+        if (!shouldUngroup && insertTargetKind === 'placement') {
+          // Same-group reorder: operate only on the group's member ordering,
+          // keep top-level entry list untouched.
+          const anchorP = room.placements.find((p) => p.id === insertTargetId);
+          if (!anchorP || !anchorP.groupId) {
+            resetState();
+            return;
+          }
+          const groupId = anchorP.groupId;
+          const groupEntryIdx = entries.findIndex(
+            (e) => e.kind === 'group' && e.group.id === groupId,
+          );
+          if (groupEntryIdx < 0) {
+            resetState();
+            return;
+          }
+          const groupEntry = entries[groupEntryIdx] as GroupEntry;
+          const membersSansDrag = groupEntry.members.filter((m) => !dragSet.has(m.id));
+          const anchorMemberIdx = membersSansDrag.findIndex((m) => m.id === insertTargetId);
+          const insertMemberAt = insertAbove ? anchorMemberIdx : anchorMemberIdx + 1;
+          const newMembers = [...membersSansDrag];
+          newMembers.splice(
+            insertMemberAt < 0 ? newMembers.length : insertMemberAt,
+            0,
+            ...draggedPlacements,
+          );
+          const newGroupEntry: GroupEntry = { ...groupEntry, members: newMembers };
+          const newEntries = entries.slice();
+          newEntries[groupEntryIdx] = newGroupEntry;
+          onReorderPlacementsBulk(flattenEntriesToPlacementIds(newEntries));
+          resetState();
+          return;
+        }
+
+        // Otherwise: dragged placements become top-level entries at the
+        // anchor position. Build a fresh entries list where:
+        //  - dragged placements are removed from any group they were part of
+        //    (so group entries still exist but with reduced members), and
+        //  - dragged placements are inserted as standalone placement entries.
+        withoutDrag = entries.map((e) => {
+          if (e.kind === 'group') {
+            const filtered = e.members.filter((m) => !dragSet.has(m.id));
+            if (filtered.length === e.members.length) return e;
+            return { ...e, members: filtered };
+          }
+          return e;
+        }).filter((e) => !(e.kind === 'placement' && dragSet.has(e.placement.id)));
+
+        draggedEntries = draggedPlacements.map((p) => ({
+          kind: 'placement',
+          placement: p,
+          effectiveZ: 0,
+        }));
+
+        // Adjust anchor index for any top-level dragged placements removed
+        // before it.
+        const removedTopLevelBefore = entries
+          .slice(0, anchorIdx)
+          .filter(
+            (e) => e.kind === 'placement' && dragSet.has((e as PlaceEntry).placement.id),
+          ).length;
+        const adjustedIdx = anchorIdx - removedTopLevelBefore;
+        insertAt = insertAbove ? adjustedIdx : adjustedIdx + 1;
+        withoutDrag.splice(insertAt, 0, ...draggedEntries);
+
+        onReorderPlacementsBulk(flattenEntriesToPlacementIds(withoutDrag));
       }
     }
 
-    setDragIds(null);
-    setIsDragActive(false);
-    dragStartPos.current = null;
-    setInsertIndicator(null);
-    setInsertTargetId(null);
-    setInsertGroupTargetId(null);
-    setDropTargetLayer(null);
-    setDropTargetGroupId(null);
-  }, [dragIds, dragGroupId, isDragActive, dropTargetLayer, dropTargetGroupId, insertTargetId, insertAbove, insertGroupTargetId, insertGroupAbove, room.placements, room.groups, onMovePlacementsToLayer, onReorderPlacementsBulk, onMoveGroupToLayer, onReorderGroups, onAddPlacementsToGroup]);
+    resetState();
+  }, [
+    dragIds, dragGroupId, isDragActive, dropTargetLayer, dropTargetGroupId,
+    insertTargetId, insertTargetKind, insertAbove,
+    room.placements, room.groups, entriesByLayer, flattenEntriesToPlacementIds, zOf,
+    onMovePlacementsToLayer, onReorderPlacementsBulk, onMoveGroupToLayer,
+    onReorderGroups, onAddPlacementsToGroup, onRemovePlacementsFromGroup,
+  ]);
 
   // ── Panel resize handlers ──────────────────────────────────────────────
   const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -561,7 +794,7 @@ export default function LayersPanel({
           style={{
             ...styles.groupHeader,
             ...(isGroupSelected ? styles.groupHeaderSelected : {}),
-            ...(isDraggingGroup ? styles.placementItemDragging : {}),
+            ...(isDraggingGroup ? { ...styles.placementItemDragging, ...styles.groupHeaderDragging } : {}),
             ...(isGroupDropTarget ? styles.groupHeaderDropTarget : {}),
           }}
           onPointerDown={(e) => handleGroupDragPointerDown(e, g.id)}
@@ -616,7 +849,6 @@ export default function LayersPanel({
           ) : (
             <span
               style={{ ...styles.groupName, ...(isGroupSelected ? { color: 'var(--accent)' } : {}) }}
-              onPointerDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 setRenamingGroup(g.id);
@@ -652,10 +884,12 @@ export default function LayersPanel({
           const isVisible = (room.layerVisibility ?? {})[layer] !== false;
           const isLocked = (room.layerLocked ?? {})[layer] === true;
           const isCollapsed = layerCollapsed[layer] ?? false;
-          const data = dataByLayer[layer];
+          const entries = entriesByLayer[layer];
           const layerName = (room.layerNames ?? {})[layer] ?? layer.charAt(0).toUpperCase() + layer.slice(1);
-          const totalCount = (data.ungrouped.length) + [...data.grouped.values()].reduce((s, a) => s + a.length, 0);
-          const layerGroups = groups.filter((g) => g.layer === layer);
+          const totalCount = entries.reduce(
+            (s, e) => s + (e.kind === 'group' ? e.members.length : 1),
+            0,
+          );
           const isDropTarget = isDragActive && dropTargetLayer === layer;
 
           return (
@@ -723,11 +957,12 @@ export default function LayersPanel({
 
               {!isCollapsed && (
                 <div style={styles.itemList}>
-                  {layerGroups.map((g) => {
-                    const gPlacements = data.grouped.get(g.id) ?? [];
-                    return renderGroup(g, gPlacements, layer);
+                  {entries.map((entry) => {
+                    if (entry.kind === 'group') {
+                      return renderGroup(entry.group, entry.members, layer);
+                    }
+                    return renderPlacement(entry.placement, layer);
                   })}
-                  {data.ungrouped.map((p) => renderPlacement(p, layer))}
                 </div>
               )}
             </div>
@@ -846,9 +1081,12 @@ const styles: Record<string, React.CSSProperties> = {
 
   groupHeader: {
     display: 'flex', alignItems: 'center', gap: 4, padding: '4px 8px 4px 20px',
-    cursor: 'pointer', fontSize: 11, background: 'var(--bg-primary)',
+    cursor: 'grab', fontSize: 11, background: 'var(--bg-primary)',
     borderTop: '1px solid var(--border)', touchAction: 'none',
     minWidth: 'fit-content',
+  },
+  groupHeaderDragging: {
+    cursor: 'grabbing',
   },
   groupHeaderSelected: {
     background: 'rgba(79, 195, 247, 0.2)',

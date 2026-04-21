@@ -543,6 +543,24 @@ export function useGrid(initial?: RoomState) {
     bumpVersion();
   }, [bumpVersion, pushUndo]);
 
+  // Removes the given placements from any group they currently belong to.
+  // Unlike `ungroupPlacements` (which deletes the whole group), this leaves
+  // the group intact with its remaining members — useful for the drag-out
+  // gesture in the Layers panel where a user drags one item out of a group
+  // to exclude it without ungrouping the rest.
+  const removePlacementsFromGroup = useCallback((placementIds: string[]) => {
+    if (placementIds.length === 0) return;
+    const idSet = new Set(placementIds);
+    pushUndo(roomRef.current);
+    setRoom((prev) => ({
+      ...prev,
+      placements: prev.placements.map((p) =>
+        idSet.has(p.id) && p.groupId !== undefined ? { ...p, groupId: undefined } : p
+      ),
+    }));
+    bumpVersion();
+  }, [bumpVersion, pushUndo]);
+
   // Atomic batch move: relocate multiple placements by (dRow, dCol) in a single undo entry
   const bulkMovePlacements = useCallback((moves: { id: string; newRow: number; newCol: number }[]) => {
     if (moves.length === 0) return;
@@ -580,15 +598,21 @@ export function useGrid(initial?: RoomState) {
     bumpVersion();
   }, [bumpVersion, pushUndo]);
 
+  // Reorders the `groups` array metadata only. The Layers-panel interleaves
+  // groups and ungrouped placements by effective zIndex, so the visible order
+  // is driven by each placement's `zIndex`. Callers that move groups around
+  // (LayersPanel drag/drop) are responsible for pairing this with
+  // `reorderPlacementsBulk` to update the zIndex values that actually drive
+  // draw order.
   const reorderGroups = useCallback((orderedGroupIds: string[]) => {
     pushUndo(roomRef.current);
     const idSet = new Set(orderedGroupIds);
     setRoom((prev) => {
-      const groupMap = new Map((prev.groups ?? []).map((g) => [g.id, g]));
+      const prevGroupMap = new Map((prev.groups ?? []).map((g) => [g.id, g]));
       const queue = [...orderedGroupIds];
       let qi = 0;
       const newGroups = (prev.groups ?? []).map((g) => {
-        if (idSet.has(g.id)) return groupMap.get(queue[qi++])!;
+        if (idSet.has(g.id)) return prevGroupMap.get(queue[qi++])!;
         return g;
       });
       return { ...prev, groups: newGroups };
@@ -648,6 +672,7 @@ export function useGrid(initial?: RoomState) {
     reorderGroups,
     moveGroupToLayer,
     addPlacementsToGroup,
+    removePlacementsFromGroup,
     bulkMovePlacements,
     bulkDuplicatePlacements,
   };
