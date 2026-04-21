@@ -19,10 +19,6 @@ interface Props {
   onAutoLayer?: (layer: LayerType) => void;
   onSetTileOverride: (id: number, tiles: [number, number][]) => void;
   onClearTileOverride: (id: number) => void;
-  activeLayer?: LayerType;
-  blockingOverrides?: Record<number, 'walkable' | 'blocking'>;
-  onSetBlocking?: (id: number, value: 'walkable' | 'blocking') => void;
-  onClearBlocking?: (id: number) => void;
 }
 
 interface FlatSection {
@@ -57,10 +53,6 @@ export default function AssetPalette({
   onAutoLayer,
   onSetTileOverride,
   onClearTileOverride,
-  activeLayer,
-  blockingOverrides,
-  onSetBlocking,
-  onClearBlocking,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState('');
@@ -215,23 +207,6 @@ export default function AssetPalette({
         })}
       </div>
 
-      {selectedAssetId !== null && activeLayer === 'object' && blockingOverrides && onSetBlocking && onClearBlocking && (
-        <div style={styles.agentFooter}>
-          <span style={styles.agentFooterLabel}>Agents</span>
-          <label style={styles.agentFooterToggle}>
-            <input
-              type="checkbox"
-              checked={blockingOverrides[selectedAssetId] === 'walkable'}
-              onChange={(e) => {
-                if (e.target.checked) onSetBlocking(selectedAssetId, 'walkable');
-                else onClearBlocking(selectedAssetId);
-              }}
-            />
-            <span>Walkable</span>
-          </label>
-        </div>
-      )}
-
       {tileEditorAsset !== null && (
         <TileEditor
           assetId={tileEditorAsset}
@@ -277,18 +252,4 @@ const styles: Record<string, React.CSSProperties> = {
   },
   tileSelected: { background: 'var(--accent-dim)' },
   selectionOverlay: { position: 'absolute' as const, inset: 0, borderRadius: 4, border: '2px solid var(--accent)', pointerEvents: 'none' as const, zIndex: 1 },
-  agentFooter: {
-    borderTop: '1px solid var(--border)',
-    padding: '8px 12px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-    background: 'var(--bg-surface)',
-  },
-  agentFooterLabel: {
-    fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', letterSpacing: 0.4, textTransform: 'uppercase' as const,
-  },
-  agentFooterToggle: {
-    display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-primary)', cursor: 'pointer',
-  },
 };

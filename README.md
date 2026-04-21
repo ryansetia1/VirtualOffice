@@ -33,14 +33,14 @@ Built with **React 19 + TypeScript + Vite** on the frontend and **Rust + Tauri 2
 - **Custom uploads**: import your own tilesheets and crop them into new assets.
 - **Per-tile overrides**: mark which tile positions within a multi-tile asset are solid/walkable.
 - **Asset renaming** (single and batch) with display-name overrides.
-- **Per-asset blocking override**: mark object-layer placements as walkable so agents can walk through them (chairs, rugs, etc.).
+- **Per-asset pixel collision**: each asset's alpha channel is auto-converted into a collision mask at load, so agents already walk through any transparent part of a tile with no setup. Right-click an asset (or use the grid menu on the Assets tab) → **Edit Collision** to paint the mask yourself with a brush tool when you want to carve a gap through a desk, make a chair walkable, etc.
 
 ### Live mode — Agents
 
 - **40 built-in character sprite sheets** (64×128 sheets, 20×32 frames, 4 directions × 3 animation columns).
 - **Add an agent** with a nickname (editable), a fixed project folder name, a sprite, and a spawn cell.
 - **WASD / arrow keys** to move the active agent a cell at a time, `E` to interact (reserved).
-- **Collision** respects placed walls + blocking object tiles.
+- **Pixel-accurate collision**: walls still block whole cells, but object-layer placements are tested against per-asset pixel masks, so agents can slip through any transparent gap — including user-painted holes — and rotations/flips carry the mask correctly.
 - **Damped follow-camera** that kicks in only when the room is larger than the viewport on a given axis — fully zoomed out, the camera stays still and the agent walks across the full view.
 - **Nameplate** with active-agent ring for quick identification.
 
@@ -146,10 +146,10 @@ VirtualOffice/
 │   ├── main.tsx              # React entry point
 │   ├── index.css             # Global theme + tab styles
 │   ├── components/           # GridCanvas, Toolbar, LayersPanel, TerminalPanel, AgentsPanel, etc.
-│   ├── hooks/                # useGrid, useTool, useAssetCategories, useCustomAssets, useAgents, useBlockingOverrides
+│   ├── hooks/                # useGrid, useTool, useAssetCategories, useCustomAssets, useAgents, useCollisionMasks
 │   ├── data/assetManifest.ts # Built-in asset catalog + tile-occupancy patterns
-│   └── utils/                # imageLoader, characterImageLoader, agentCollision, agentFolders,
-│                             # assetFiles, pty, tauri, roomStorage, projectFile
+│   └── utils/                # imageLoader, characterImageLoader, agentCollision, pixelMasks,
+│                             # agentFolders, assetFiles, pty, tauri, roomStorage, projectFile
 ├── src-tauri/
 │   ├── src/
 │   │   ├── main.rs           # Binary entry point
@@ -178,7 +178,7 @@ All project state lives in `localStorage`:
 - `virtualOffice_tileOverrides`
 - `virtualOffice_customAssets`
 - `virtualOffice_agents`
-- `virtualOffice_blockingOverrides`
+- `virtualOffice_collisionMasks` (legacy `virtualOffice_blockingOverrides` is still bundled for migration and dropped on first load)
 
 These same keys are what `exportProject()` bundles into a single JSON file.
 

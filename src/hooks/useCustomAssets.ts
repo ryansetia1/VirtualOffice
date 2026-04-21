@@ -1,5 +1,5 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
-import { cacheImage, getCachedImage } from '../utils/imageLoader';
+import { cacheImage, getCachedImage, setCustomAssetMask, clearAssetMask } from '../utils/imageLoader';
 import type { AssetInfo } from '../data/assetManifest';
 
 const STORAGE_KEY = 'virtualOffice_customAssets';
@@ -70,10 +70,20 @@ function cropTilesToDataUrl(
   return canvas.toDataURL();
 }
 
-function cacheFromDataUrl(id: number, dataUrl: string): Promise<void> {
+function cacheFromDataUrl(
+  id: number,
+  dataUrl: string,
+  tiles: [number, number][],
+  spanW: number,
+  spanH: number,
+): Promise<void> {
   return new Promise((resolve) => {
     const img = new Image();
-    img.onload = () => { cacheImage(id, img); resolve(); };
+    img.onload = () => {
+      cacheImage(id, img);
+      setCustomAssetMask(id, img, tiles, spanW, spanH);
+      resolve();
+    };
     img.onerror = () => resolve();
     img.src = dataUrl;
   });
@@ -89,7 +99,7 @@ export function useCustomAssets() {
     const data = loadData();
     for (const a of data) {
       if (a.dataUrl && !getCachedImage(a.id)) {
-        cacheFromDataUrl(a.id, a.dataUrl);
+        cacheFromDataUrl(a.id, a.dataUrl, a.tiles, a.spanW, a.spanH);
       }
     }
   }, []);
@@ -118,7 +128,7 @@ export function useCustomAssets() {
         if (source) {
           const dataUrl = cropTilesToDataUrl(source, a.cropX, a.cropY, a.spanW, a.spanH, a.tiles);
           asset.dataUrl = dataUrl;
-          await cacheFromDataUrl(asset.id, dataUrl);
+          await cacheFromDataUrl(asset.id, dataUrl, a.tiles, a.spanW, a.spanH);
         }
         withIds.push(asset);
       }
@@ -137,6 +147,7 @@ export function useCustomAssets() {
       saveData(next);
       return next;
     });
+    clearAssetMask(id);
   }, []);
 
   const customAssetInfos: AssetInfo[] = assets.map((a) => ({

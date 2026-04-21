@@ -1,79 +1,133 @@
-import type { RoomState, LayerType } from '../hooks/useGrid';
+import type { RoomState, Placement } from '../hooks/useGrid';
+import { samplePlacementPixel, type PixelMask } from './pixelMasks';
 
-export type BlockingMap = Record<number, 'walkable' | 'blocking'>;
+/**
+ * Pixel-accurate collision for the live-mode agent.
+ *
+ * Walls still block whole cells (a wall is a wall), but object-layer
+ * placements are tested against the asset's alpha mask so agents can walk
+ * through any fully-transparent part of the asset. The user can override the
+ * auto-derived mask per asset in the Collision Editor.
+ */
 
+const TILE = 48;
+/**
+ * Fraction of a cell the agent's footprint covers. The 4 sample points sit on
+ * the corners of this inset square so the agent can hug walls without
+ * clipping into them.
+ */
 const AGENT_FOOTPRINT = 0.7;
+
+export interface MasksApi {
+  /** Returns the effective mask (override ∪ auto) for an asset, or null if
+   * no mask is known yet (image still loading). */
+  getMask(assetId: number): PixelMask | null;
+}
 
 function placementCovers(
   p: { row: number; col: number; spanW: number; spanH: number },
   r: number,
-  c: number
+  c: number,
 ): boolean {
   return r >= p.row && r < p.row + p.spanH && c >= p.col && c < p.col + p.spanW;
 }
 
-function isLayerBlocking(
-  room: RoomState,
-  r: number,
-  c: number,
-  layer: LayerType,
-  blocking: BlockingMap,
-): boolean {
-  if (r < 0 || c < 0 || r >= room.height || c >= room.width) return true;
+/**
+ * Walls block whole cells. Any wall placement whose bounding box contains the
+ * sample cell counts as blocking (unless the wall layer is hidden).
+ */
+function wallBlockedAtCell(room: RoomState, r: number, c: number): boolean {
+  if ((room.layerVisibility ?? {}).wall === false) return false;
   for (const p of room.placements) {
-    if (p.layer !== layer) continue;
-    if ((room.layerVisibility ?? {})[p.layer] === false) continue;
-    if (!placementCovers(p, r, c)) continue;
-    if (layer === 'wall') return true;
-    if (layer === 'object') {
-      // Default blocking unless explicit 'walkable'
-      if (blocking[p.assetId] !== 'walkable') return true;
-    }
+    if (p.layer !== 'wall') continue;
+    if (placementCovers(p, r, c)) return true;
   }
   return false;
 }
 
-function cellBlocked(
+/**
+ * Object-layer test at world pixel coordinates (cell * TILE). Samples the
+ * effective mask for every object placement whose bounding box contains the
+ * pixel; any opaque bit = blocked.
+ */
+function objectBlockedAtPixel(
   room: RoomState,
-  r: number,
-  c: number,
-  blocking: BlockingMap,
+  wxPx: number,
+  wyPx: number,
+  masks: MasksApi,
 ): boolean {
-  if (isLayerBlocking(room, r, c, 'wall', blocking)) return true;
-  if (isLayerBlocking(room, r, c, 'object', blocking)) return true;
+  if ((room.layerVisibility ?? {}).object === false) return false;
+  const r = Math.floor(wyPx / TILE);
+  const c = Math.floor(wxPx / TILE);
+  for (const p of room.placements) {
+    if (p.layer !== 'object') continue;
+    if (!placementCovers(p, r, c)) continue;
+    const mask = masks.getMask(p.assetId);
+    if (!mask) {
+      // Mask not yet known — be conservative and treat the covered cell as
+      // blocking. This matches the legacy default where object placements
+      // blocked unless explicitly walkable.
+      return true;
+    }
+    if (samplePlacementPixel(p as Placement, wxPx, wyPx, mask)) return true;
+  }
+  return false;
+}
+
+/**
+ * Test whether a single world pixel is blocked by any wall or object.
+ */
+export function pixelBlocked(
+  wxPx: number,
+  wyPx: number,
+  room: RoomState,
+  masks: MasksApi,
+): boolean {
+  const r = Math.floor(wyPx / TILE);
+  const c = Math.floor(wxPx / TILE);
+  if (r < 0 || c < 0 || r >= room.height || c >= room.width) return true;
+  if (wallBlockedAtCell(room, r, c)) return true;
+  if (objectBlockedAtPixel(room, wxPx, wyPx, masks)) return true;
   return false;
 }
 
 /**
  * Test whether an agent with 1-cell footprint (reduced to AGENT_FOOTPRINT)
- * can stand with top-left at (row, col).
+ * can stand with top-left at (row, col). Samples 4 corners + the center of
+ * the inset square at pixel resolution so agents can slip through narrow
+ * transparent gaps.
  */
 export function canAgentStandAt(
   row: number,
   col: number,
   room: RoomState,
-  blocking: BlockingMap,
+  masks: MasksApi,
 ): boolean {
   if (row < 0 || col < 0) return false;
   if (row + 1 > room.height || col + 1 > room.width) return false;
   const inset = (1 - AGENT_FOOTPRINT) / 2;
-  const corners: Array<[number, number]> = [
-    [row + inset, col + inset],
-    [row + inset, col + 1 - inset],
-    [row + 1 - inset, col + inset],
-    [row + 1 - inset, col + 1 - inset],
+  const left = (col + inset) * TILE;
+  const right = (col + 1 - inset) * TILE - 1;
+  const top = (row + inset) * TILE;
+  const bottom = (row + 1 - inset) * TILE - 1;
+  const cx = (col + 0.5) * TILE;
+  const cy = (row + 0.5) * TILE;
+  const samples: Array<[number, number]> = [
+    [left, top],
+    [right, top],
+    [left, bottom],
+    [right, bottom],
+    [cx, cy],
   ];
-  for (const [cr, cc] of corners) {
-    const ir = Math.floor(cr);
-    const ic = Math.floor(cc);
-    if (cellBlocked(room, ir, ic, blocking)) return false;
+  for (const [px, py] of samples) {
+    if (pixelBlocked(px, py, room, masks)) return false;
   }
   return true;
 }
 
 /**
  * Attempt a movement, trying axis-separated fallback so agents can slide
- * along walls.
+ * along walls (and now slip through pixel gaps on one axis at a time).
  */
 export function resolveAgentMove(
   fromRow: number,
@@ -81,19 +135,17 @@ export function resolveAgentMove(
   dRow: number,
   dCol: number,
   room: RoomState,
-  blocking: BlockingMap,
+  masks: MasksApi,
 ): { row: number; col: number } {
-  let nRow = fromRow + dRow;
-  let nCol = fromCol + dCol;
-  if (canAgentStandAt(nRow, nCol, room, blocking)) {
+  const nRow = fromRow + dRow;
+  const nCol = fromCol + dCol;
+  if (canAgentStandAt(nRow, nCol, room, masks)) {
     return { row: nRow, col: nCol };
   }
-  // Try horizontal only
-  if (dCol !== 0 && canAgentStandAt(fromRow, fromCol + dCol, room, blocking)) {
+  if (dCol !== 0 && canAgentStandAt(fromRow, fromCol + dCol, room, masks)) {
     return { row: fromRow, col: fromCol + dCol };
   }
-  // Try vertical only
-  if (dRow !== 0 && canAgentStandAt(fromRow + dRow, fromCol, room, blocking)) {
+  if (dRow !== 0 && canAgentStandAt(fromRow + dRow, fromCol, room, masks)) {
     return { row: fromRow + dRow, col: fromCol };
   }
   return { row: fromRow, col: fromCol };
@@ -107,17 +159,17 @@ export function findNearestWalkable(
   row: number,
   col: number,
   room: RoomState,
-  blocking: BlockingMap,
+  masks: MasksApi,
   maxRadius = 20,
 ): { row: number; col: number } | null {
-  if (canAgentStandAt(row, col, room, blocking)) return { row, col };
+  if (canAgentStandAt(row, col, room, masks)) return { row, col };
   for (let radius = 1; radius <= maxRadius; radius++) {
     for (let dr = -radius; dr <= radius; dr++) {
       for (let dc = -radius; dc <= radius; dc++) {
         if (Math.max(Math.abs(dr), Math.abs(dc)) !== radius) continue;
         const r = row + dr;
         const c = col + dc;
-        if (canAgentStandAt(r, c, room, blocking)) return { row: r, col: c };
+        if (canAgentStandAt(r, c, room, masks)) return { row: r, col: c };
       }
     }
   }

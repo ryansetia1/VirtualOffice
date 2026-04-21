@@ -45,13 +45,15 @@ We originally used `cellPx * 1.35` (chibi-sized) and bumped it 1.5× to `2.025` 
 
 ### Collision
 
-`src/utils/agentCollision.ts` builds a walkability grid from placements:
+`src/utils/agentCollision.ts` is pixel-accurate at the agent's footprint:
 
 - **Floor layer**: never blocks.
-- **Wall layer**: always blocks.
-- **Object layer**: blocks **by default**; `useBlockingOverrides` lets a specific asset be tagged `'walkable'` (think: rugs, small carpets, chairs you want to pass through).
+- **Wall layer**: always blocks at cell granularity (walls are solid).
+- **Object layer**: blocked *per pixel*. Each asset has a pixel mask — by default auto-derived from the PNG's alpha channel at load time, so any fully-transparent part of an asset is walkable with no configuration. Users can paint per-asset overrides in the Collision Editor (open via right-click → "Edit Collision" on the Assets tab, or the same option on an asset row); overrides are keyed by asset id and win over the auto mask.
 
-Per-asset overrides live in `virtualOffice_blockingOverrides`.
+The agent samples four corners of an inset footprint (`AGENT_FOOTPRINT = 0.7`) plus its center at world-pixel resolution; any opaque bit in any placement whose bounding box covers the sample point = blocked. Rotation and flip are applied via an inverse transform in `samplePlacementPixel` in `src/utils/pixelMasks.ts`, so a hole painted in a desk follows the desk around as the user rotates or flips it in Build mode.
+
+Auto masks live on `window.__assetMaskCache` (HMR-stable). User overrides persist to `virtualOffice_collisionMasks` as `${w}x${h}:${base64}` strings and round-trip through project export/import. The legacy `virtualOffice_blockingOverrides` walkable flags are migrated into empty pixel masks on first load and removed.
 
 ---
 
@@ -224,7 +226,7 @@ In browser-only mode (`isTauri() === false`) all of this becomes a no-op and cat
 ## 5. Change log for this session
 
 - **Agents / live mode**
-  - `useAgents` + `useBlockingOverrides` hooks.
+  - `useAgents` + `useCollisionMasks` hooks (pixel-accurate collision; `useBlockingOverrides` retired after one-shot migration).
   - `AgentsPanel`, `AddAgentModal` UI.
   - WASD / arrow movement + `E` reserved.
   - Sprite loader + 40 character sheets under `public/characters/`.
@@ -249,8 +251,8 @@ In browser-only mode (`isTauri() === false`) all of this becomes a no-op and cat
   - `useAssetCategories` refactored to mirror changes to disk when running in Tauri.
 
 - **Persistence**
-  - New `localStorage` keys: `virtualOffice_agents`, `virtualOffice_blockingOverrides`.
-  - Both added to `KEYS` in `projectFile.ts` so export/import keeps round-tripping everything.
+  - New `localStorage` keys: `virtualOffice_agents`, `virtualOffice_collisionMasks` (legacy `virtualOffice_blockingOverrides` still bundled for migration).
+  - All added to `KEYS` in `projectFile.ts` so export/import keeps round-tripping everything.
 
 ---
 

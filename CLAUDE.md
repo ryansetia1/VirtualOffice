@@ -32,7 +32,7 @@ All source-of-truth state is produced in hooks and plumbed down as props. There 
 | `useAssetCategories(customAssetIds)` | Asset library tree: `rootLabel`, hierarchical categories, uncategorized IDs, per-asset display names, per-tile overrides, **and** (in Tauri) mirroring of category moves/renames to the real asset directory on disk. |
 | `useCustomAssets()` | User-uploaded tilesheets & their cropped sub-assets. IDs start at 1000 to avoid collision with the 1–340 built-in range. |
 | `useAgents()` | The list of live-mode agents, their position/facing/`animFrame`, `activeAgentId`, and mutation APIs (`addAgent`, `renameAgent`, `setSpriteId`, `moveAgent`, `setFacing`, `removeAgent`). Persists to `virtualOffice_agents`. |
-| `useBlockingOverrides()` | Per-asset walkable/blocking overrides used by agent collision. Defaults object-layer placements to `blocking`; only explicit `'walkable'` lets agents pass through. Persists to `virtualOffice_blockingOverrides`. |
+| `useCollisionMasks()` | Per-asset pixel collision masks used by agent collision. Auto masks are derived from each asset's alpha channel at load (on `window.__assetMaskCache`); user paints in the Collision Editor persist to `virtualOffice_collisionMasks` and win over the auto mask. Migrates the legacy `virtualOffice_blockingOverrides` walkable flags into empty masks on first load. |
 
 ### Data types worth memorizing
 
@@ -99,7 +99,8 @@ interface Agent {
 
 - `imageLoader.ts` — preloads all 340 tiles on app start, caches `HTMLImageElement`s on `window.__assetImageCache` to survive HMR. `preloadAllAssets(urlResolver?)` accepts the dynamic URL resolver from `assetFiles.ts` so assets that have been moved into category subfolders still load. Use `getCachedImage(assetId)` for sync access during canvas render.
 - `characterImageLoader.ts` — same pattern but for the 40 character sprite sheets under `public/characters/000.png..039.png`. Each sheet is **64×128**, laid out as 3 columns × 4 rows, but each frame is only **20×32** — the last 4 pixels on the right of every sheet are padding and **must not** be sampled. Exports `CHAR_FRAME_W=20`, `CHAR_FRAME_H=32`, `FACING_ROW`, `preloadAllCharacters`, `getCachedCharacter`.
-- `agentCollision.ts` — maps placements to a walkability grid using `useBlockingOverrides`. Object-layer placements block by default; floor placements never block; walls always block.
+- `agentCollision.ts` — pixel-accurate collision. Samples each agent footprint point against the effective pixel mask (override ∪ auto) for every object placement whose AABB covers that cell, honoring the placement's rotation + flip. Walls still block at cell granularity; floor never blocks.
+- `pixelMasks.ts` — mask types, alpha-threshold mask generation, bit-level get/set, base64 encode/decode for localStorage, and `samplePlacementPixel()` with the rotation/flip inverse math.
 - `agentFolders.ts` — thin wrapper around the Rust agent-folder commands (`create`, `delete`, `list`, `agentFolderPath`). `isFolderNameValid(name)` enforces the same `[a-z0-9_-]+, max 64 chars` rule used on the Rust side.
 - `assetFiles.ts` — mirror of `useAssetCategories` mutations to the real asset directory when running in Tauri. Exposes `resolveAssetUrl(assetId)` so thumbnails and the canvas renderer pick up moved/renamed files without refreshing the page.
 - `pty.ts` — PTY IPC wrapper. Uses a typed Tauri `Channel<PtyMsg>` to stream shell output back into the renderer (messages are `{kind:'ready'|'data'|'exit'}`; `data` carries a base64 payload that the client decodes to `Uint8Array`). Also exposes `ptyWriteString`, `ptyWriteBytes`, `ptyResize`, `ptyKill`.
@@ -130,7 +131,7 @@ interface Agent {
 
 - Live mode is the `live` tab rendered with `GridCanvas` in `readOnly` mode. It layers agents on top of the placed room and adds keyboard interaction.
 - **Input** (handled in `App.tsx`): WASD/arrow keys move the active agent one cell at a time, `E` is the "interact" key, and **double-click on an agent** opens its terminal tab (`TerminalPanel`).
-- **Collision** comes from `agentCollision.ts`: agents can walk on empty cells + floor tiles + any object explicitly tagged walkable; walls and un-overridden objects block.
+- **Collision** comes from `agentCollision.ts`: agents walk on empty cells + floor tiles + transparent pixels of any object (per the asset's auto or user-painted mask). Walls always block at cell granularity; un-derived objects (image still loading) fall back to whole-cell blocking.
 - **Sprites** are drawn at `spriteH = cellPx * 2.025` (1-cell footprint, but roughly 2× cell height so characters read as people-size instead of chibi). `spriteW` is derived from the 20×32 frame aspect ratio so no horizontal squish. Both render and hit-test use the same multiplier — if you change it, change both call sites in `GridCanvas.tsx`.
 - **Camera follow** is computed in `GridCanvas.tsx` as a `useMemo` called `effectiveOffset`. It does **not** run in a `requestAnimationFrame` loop. Each render it re-derives the offset needed to center the active agent, but only if the room is larger than the viewport on that axis, and clamps to room edges. Because the derivation runs in the same commit as the agent position update, the two stay perfectly in sync (no jitter). Build mode keeps using the raw `offset` state.
 - **Terminal** sessions are `sessionId = \`agent:\${agent.id}\``. `TerminalPanel.tsx` boots xterm.js, calls `ptySpawn` with a fresh `Channel`, and wires xterm `onData`/`onBinary` → `ptyWriteString`/`ptyWriteBytes`. Tabs are closable; killing the PTY fires an `exit` message that auto-closes the tab after ~600 ms.
@@ -146,11 +147,11 @@ interface Agent {
 | `virtualOffice_tileOverrides` | `useAssetCategories` | Per-asset/per-tile occupancy overrides. |
 | `virtualOffice_customAssets` | `useCustomAssets` | User-imported tilesheets and crop definitions. |
 | `virtualOffice_agents` | `useAgents` | Agents list + `activeAgentId`. |
-| `virtualOffice_blockingOverrides` | `useBlockingOverrides` | Per-asset walkable/blocking flags. |
+| `virtualOffice_collisionMasks` | `useCollisionMasks` | Per-asset pixel-mask overrides painted in the Collision Editor. |
 
 These six keys are the exact payload of `exportProject` / `importProject`. **If you add another persisted key, you must add it to `KEYS` in `src/utils/projectFile.ts`** or export/import will silently drop it.
 
-Legacy keys (`virtualOffice_assetOverrides`, `virtualOffice_customCategories`, `virtualOffice_categoryLabels`, `virtualOffice_initialized`) are migrated away from on first load by `useAssetCategories`.
+Legacy keys (`virtualOffice_assetOverrides`, `virtualOffice_customCategories`, `virtualOffice_categoryLabels`, `virtualOffice_initialized`) are migrated away from on first load by `useAssetCategories`. `virtualOffice_blockingOverrides` is the legacy walkable/blocking flag store; `useCollisionMasks` migrates any `walkable` entries into empty pixel masks and deletes the key on first load. The key is still listed in `projectFile.ts` so old project files import cleanly.
 
 ### Filesystem (Tauri only)
 
@@ -221,7 +222,7 @@ If you add more Tauri-backed effects that allocate resources, follow the same sh
 ### Add a new persisted setting
 
 1. Add a key like `virtualOffice_mySetting`.
-2. Wrap the load/save in a hook (see `useBlockingOverrides` for a minimal template).
+2. Wrap the load/save in a hook (see `useCollisionMasks` for a template that also handles a one-shot migration).
 3. Add the key to `KEYS` in `src/utils/projectFile.ts` so it round-trips through export/import.
 
 ### Add a new Tauri command

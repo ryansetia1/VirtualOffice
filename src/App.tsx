@@ -4,7 +4,7 @@ import { useTool } from './hooks/useTool';
 import { useAssetCategories } from './hooks/useAssetCategories';
 import { useCustomAssets } from './hooks/useCustomAssets';
 import { useAgents } from './hooks/useAgents';
-import { useBlockingOverrides } from './hooks/useBlockingOverrides';
+import { useCollisionMasks } from './hooks/useCollisionMasks';
 import { preloadAllAssets } from './utils/imageLoader';
 import {
   preloadAllCharacters,
@@ -138,7 +138,7 @@ export default function App() {
   } = useGrid(initialRoom);
   const { toolState, setMode, setDrawSubTool, setTool, setActiveLayer, selectAsset, rotateAsset, flipHAsset, flipVAsset, resetTransform } = useTool();
   const agentsApi = useAgents();
-  const blockingApi = useBlockingOverrides();
+  const collisionApi = useCollisionMasks();
   const { customAssets, customAssetInfos, addCustomAssets, removeCustomAsset } = useCustomAssets();
   const customAssetIds = customAssets.map((a) => a.id);
   const {
@@ -245,15 +245,15 @@ export default function App() {
     if (!a) return;
     const ar = Math.round(a.row);
     const ac = Math.round(a.col);
-    if (!canAgentStandAt(a.row, a.col, room, blockingApi.overrides)) {
-      const spot = findNearestWalkable(ar, ac, room, blockingApi.overrides);
+    if (!canAgentStandAt(a.row, a.col, room, collisionApi)) {
+      const spot = findNearestWalkable(ar, ac, room, collisionApi);
       if (spot) {
         snapGuardRef.current = true;
         agentsApi.moveAgent(id, spot.row, spot.col, a.facing, 1);
         window.setTimeout(() => { snapGuardRef.current = false; }, 200);
       }
     }
-  }, [activeTab, agentsApi, room, blockingApi.overrides]);
+  }, [activeTab, agentsApi, room, collisionApi]);
 
   // ── Agent WASD movement loop (live tab only) ─────────────────────────────
   const roomRef = useRef(room);
@@ -262,8 +262,8 @@ export default function App() {
   agentsApiRef.current = agentsApi;
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
-  const blockingRef = useRef(blockingApi.overrides);
-  blockingRef.current = blockingApi.overrides;
+  const collisionRef = useRef(collisionApi);
+  collisionRef.current = collisionApi;
 
   const heldKeysRef = useRef<Set<string>>(new Set());
   const rafRef = useRef<number | null>(null);
@@ -315,7 +315,7 @@ export default function App() {
         const stepX = (dx / len) * AGENT_SPEED * dt;
         const stepY = (dy / len) * AGENT_SPEED * dt;
 
-        const next = resolveAgentMove(active.row, active.col, stepY, stepX, roomRef.current, blockingRef.current);
+        const next = resolveAgentMove(active.row, active.col, stepY, stepX, roomRef.current, collisionRef.current);
 
         // Facing based on dominant axis of requested movement
         let facing: Facing = active.facing;
@@ -546,10 +546,6 @@ export default function App() {
               onAutoLayer={setActiveLayer}
               onSetTileOverride={setTileOverride}
               onClearTileOverride={clearTileOverride}
-              activeLayer={toolState.activeLayer}
-              blockingOverrides={blockingApi.overrides}
-              onSetBlocking={blockingApi.setBlocking}
-              onClearBlocking={blockingApi.clearBlocking}
             />
           </div>
         </>
@@ -578,9 +574,10 @@ export default function App() {
           onClearTileOverride={clearTileOverride}
           onAddCustomAssets={addCustomAssets}
           onRemoveCustomAsset={removeCustomAsset}
-          blockingOverrides={blockingApi.overrides}
-          onSetBlocking={blockingApi.setBlocking}
-          onClearBlocking={blockingApi.clearBlocking}
+          isCollisionOverridden={collisionApi.isOverridden}
+          getCollisionMask={collisionApi.getMask}
+          onSetCollisionMask={collisionApi.setMask}
+          onClearCollisionMask={collisionApi.clearMask}
         />
       )}
       {(() => {
@@ -678,7 +675,7 @@ export default function App() {
           onCreated={({ nickname, folderName, spriteId }) => {
             const cx = Math.floor(room.width / 2);
             const cy = Math.floor(room.height / 2);
-            const spot = findNearestWalkable(cy, cx, room, blockingApi.overrides) ?? { row: cy, col: cx };
+            const spot = findNearestWalkable(cy, cx, room, collisionApi) ?? { row: cy, col: cx };
             agentsApi.addAgent({
               nickname,
               folderName,

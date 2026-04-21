@@ -1,10 +1,12 @@
 import { useState, useMemo, useCallback, type DragEvent } from 'react';
-import { getAllAssets, type AssetInfo } from '../data/assetManifest';
+import { getAllAssets, getAssetTileInfo, type AssetInfo } from '../data/assetManifest';
 import { getEmptyDragImage } from '../utils/imageLoader';
+import { getAutoMask, type PixelMask } from '../utils/pixelMasks';
 import type { CustomAssetData } from '../hooks/useCustomAssets';
 import type { TreeNode } from '../hooks/useAssetCategories';
 import ContextMenu, { type MenuItem } from './ContextMenu';
 import TileEditor from './TileEditor';
+import CollisionEditor from './CollisionEditor';
 import ImportDialog from './ImportDialog';
 import AssetThumbnail from './AssetThumbnail';
 
@@ -30,9 +32,10 @@ interface Props {
   onAddCustomAssets: (assets: Omit<CustomAssetData, 'id'>[]) => Promise<CustomAssetData[]>;
   onRemoveCustomAsset: (id: number) => void;
   resolveAssetUrl?: (id: number) => string;
-  blockingOverrides: Record<number, 'walkable' | 'blocking'>;
-  onSetBlocking: (id: number, value: 'walkable' | 'blocking') => void;
-  onClearBlocking: (id: number) => void;
+  isCollisionOverridden: (id: number) => boolean;
+  getCollisionMask: (id: number) => PixelMask | null;
+  onSetCollisionMask: (id: number, mask: PixelMask) => void;
+  onClearCollisionMask: (id: number) => void;
 }
 
 const UNCATEGORIZED = '__uncategorized__';
@@ -60,9 +63,10 @@ export default function AssetManager({
   onAddCustomAssets,
   onRemoveCustomAsset,
   resolveAssetUrl,
-  blockingOverrides,
-  onSetBlocking,
-  onClearBlocking,
+  isCollisionOverridden,
+  getCollisionMask,
+  onSetCollisionMask,
+  onClearCollisionMask,
 }: Props) {
   const [selectedView, setSelectedView] = useState<string>(ALL_VIEW);
   const [search, setSearch] = useState('');
@@ -78,6 +82,7 @@ export default function AssetManager({
   const [rootLabelValue, setRootLabelValue] = useState(library.rootLabel);
 
   const [tileEditorAsset, setTileEditorAsset] = useState<number | null>(null);
+  const [collisionEditorAsset, setCollisionEditorAsset] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importTargetCat, setImportTargetCat] = useState<string>('');
 
@@ -332,6 +337,10 @@ export default function AssetManager({
           onClick: () => setTileEditorAsset(singleId),
         });
       }
+      items.push({
+        label: isCollisionOverridden(singleId) ? 'Edit Collision (custom)' : 'Edit Collision',
+        onClick: () => setCollisionEditorAsset(singleId),
+      });
     }
 
     if (allCategoryPaths.length > 0) {
@@ -355,17 +364,13 @@ export default function AssetManager({
       });
     }
 
-    // Walkability toggle (agent collision)
-    {
-      const anyWalkable = targetIds.some((id) => blockingOverrides[id] === 'walkable');
+    // Bulk collision reset: clear any custom collision overrides on the
+    // selected assets so they fall back to the pixel-derived auto mask.
+    if (targetIds.some((id) => isCollisionOverridden(id))) {
       items.push({
-        label: anyWalkable ? 'Mark as Blocking (agents)' : 'Mark as Walkable (agents)',
+        label: isBulk ? `Reset collision for ${label}` : 'Reset collision to auto',
         onClick: () => {
-          if (anyWalkable) {
-            for (const id of targetIds) onClearBlocking(id);
-          } else {
-            for (const id of targetIds) onSetBlocking(id, 'walkable');
-          }
+          for (const id of targetIds) onClearCollisionMask(id);
         },
       });
     }
@@ -401,7 +406,7 @@ export default function AssetManager({
     }
 
     return items;
-  }, [customAssetMap, getAssetDisplayName, allCategoryPaths, assetCategoryMap, onUncategorizeAssets, onRemoveCustomAsset, blockingOverrides, onSetBlocking, onClearBlocking]);
+  }, [customAssetMap, getAssetDisplayName, allCategoryPaths, assetCategoryMap, onUncategorizeAssets, onRemoveCustomAsset, isCollisionOverridden, onClearCollisionMask]);
 
   const handleAssetRenameSubmit = useCallback(() => {
     if (renamingAssetId === null) return;
@@ -626,8 +631,8 @@ export default function AssetManager({
                       />
                       {hasTileOverride && <div style={styles.tileDot} />}
                       {isCustom && <div style={styles.customDot} />}
-                      {blockingOverrides[asset.id] === 'walkable' && (
-                        <div style={styles.walkableBadge} title="Walkable by agents">W</div>
+                      {isCollisionOverridden(asset.id) && (
+                        <div style={styles.walkableBadge} title="Custom collision mask">C</div>
                       )}
                     </div>
                     {isSelected && <div style={styles.selectionOverlay} />}
@@ -718,6 +723,49 @@ export default function AssetManager({
           onClose={() => setTileEditorAsset(null)}
         />
       )}
+
+      {/* Collision editor modal */}
+      {collisionEditorAsset !== null && (() => {
+        const id = collisionEditorAsset;
+        const custom = customAssetMap.get(id);
+        let tiles: [number, number][];
+        let srcCol = 0;
+        let srcRow = 0;
+        if (custom) {
+          tiles = custom.tiles;
+        } else {
+          const override = tileOverrides[id];
+          if (override && override.length > 0) {
+            const minC = Math.min(...override.map((t) => t[0]));
+            const minR = Math.min(...override.map((t) => t[1]));
+            tiles = override;
+            srcCol = minC;
+            srcRow = minR;
+          } else {
+            const info = getAssetTileInfo(id);
+            tiles = info.tiles;
+            srcCol = info.srcCol;
+            srcRow = info.srcRow;
+          }
+        }
+        const effective = getCollisionMask(id) ?? undefined;
+        const auto = getAutoMask(id);
+        return (
+          <CollisionEditor
+            assetId={id}
+            displayName={getAssetDisplayName(id)}
+            initialMask={effective}
+            autoMask={auto}
+            hasOverride={isCollisionOverridden(id)}
+            tiles={tiles}
+            srcCol={srcCol}
+            srcRow={srcRow}
+            onSave={(m) => onSetCollisionMask(id, m)}
+            onReset={() => onClearCollisionMask(id)}
+            onClose={() => setCollisionEditorAsset(null)}
+          />
+        );
+      })()}
 
       {/* Import dialog */}
       {importOpen && (

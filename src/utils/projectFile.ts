@@ -9,6 +9,11 @@ const KEYS = [
   'virtualOffice_tileOverrides',
   'virtualOffice_customAssets',
   'virtualOffice_agents',
+  // Current: pixel-mask collision overrides (painted in the Collision Editor).
+  'virtualOffice_collisionMasks',
+  // Legacy walkable/blocking toggle — still bundled so old project files and
+  // half-migrated installs round-trip cleanly. `useCollisionMasks` migrates
+  // these into mask form on first load and removes the key.
   'virtualOffice_blockingOverrides',
 ] as const;
 
