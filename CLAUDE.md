@@ -1,3 +1,8 @@
+---
+description: 
+alwaysApply: true
+---
+
 # CLAUDE.md
 
 Guidance for AI coding assistants (Claude, Cursor, etc.) working in this repo. Read this before making non-trivial changes.

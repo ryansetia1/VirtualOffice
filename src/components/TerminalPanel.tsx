@@ -145,7 +145,6 @@ function TerminalView({ agent, active, onAutoClose }: { agent: Agent; active: bo
 
         if (state.disposed) { term.dispose(); return; }
 
-        term.write('\x1b[90m[terminal opened]\x1b[0m\r\n');
         try { fitAddon.fit(); } catch (e) { console.warn('[terminal] fit failed (non-fatal)', e); }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -185,12 +184,11 @@ function TerminalView({ agent, active, onAutoClose }: { agent: Agent; active: bo
         setStatusMsg('spawning shell…');
         const safeCols = term.cols && term.cols > 2 ? term.cols : 100;
         const safeRows = term.rows && term.rows > 2 ? term.rows : 30;
-        term.write(`\x1b[90m[cwd: ${cwd}]\x1b[0m\r\n`);
+        term.write(`\x1b[90m[projects/${agent.folderName}]\x1b[0m\r\n`);
         const closeChannel = await ptySpawn(sessionId, cwd, safeCols, safeRows, {
           onReady: () => {
             if (state.disposed) return;
             setStatusMsg('');
-            term.write('\x1b[90m[pty ready]\x1b[0m\r\n');
           },
           onData: (bytes) => {
             if (state.disposed) return;
