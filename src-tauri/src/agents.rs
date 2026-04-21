@@ -114,6 +114,18 @@ pub fn create_agent_folder(folder_name: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Idempotent variant of `create_agent_folder`: returns the folder path if it
+/// already exists, otherwise creates it. Used when more than one agent is
+/// allowed to share the same project directory.
+#[tauri::command]
+pub fn ensure_agent_folder(folder_name: String) -> Result<String, String> {
+    let path = resolve_under_root(&folder_name)?;
+    if !path.exists() {
+        fs::create_dir_all(&path).map_err(|e| format!("Failed to create folder: {}", e))?;
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub fn delete_agent_folder(folder_name: String) -> Result<(), String> {
     let path = resolve_under_root(&folder_name)?;

@@ -751,7 +751,7 @@ export default function App() {
         <AddAgentModal
           adoptFolder={addAgentModal.adoptFolder}
           usedSpriteIds={agentsApi.agents.map((a) => a.spriteId)}
-          existingFolderNames={agentsApi.agents.map((a) => a.folderName)}
+          existingAgents={agentsApi.agents.map((a) => ({ nickname: a.nickname, folderName: a.folderName }))}
           onClose={() => setAddAgentModal(null)}
           onCreated={({ nickname, folderName, spriteId }) => {
             const cx = Math.floor(room.width / 2);
@@ -1026,6 +1026,13 @@ export default function App() {
       {removeDialog && (() => {
         const agent = agentsApi.agents.find((a) => a.id === removeDialog.id);
         if (!agent) return null;
+        // Detect folder-sharing: when another agent still points at the same
+        // directory, deleting the folder would yank the ground out from under
+        // it — so we hide the destructive option entirely in that case.
+        const sharingAgents = agentsApi.agents.filter(
+          (other) => other.id !== agent.id && other.folderName.toLowerCase() === agent.folderName.toLowerCase()
+        );
+        const folderIsShared = sharingAgents.length > 0;
         const removeKeepingFolder = () => {
           closeAgentTerminal(agent.id);
           agentsApi.removeAgent(agent.id);
@@ -1049,15 +1056,21 @@ export default function App() {
             <div style={dialogStyles.modal} onClick={(e) => e.stopPropagation()}>
               <h3 style={dialogStyles.title}>Remove "{agent.nickname}"?</h3>
               <p style={dialogStyles.subtitle}>
-                Folder <code>projects/{agent.folderName}</code> can be deleted with the agent,
-                or kept as an orphan so another agent can adopt it later.
+                {folderIsShared
+                  ? <>Folder <code>projects/{agent.folderName}</code> is also used by{' '}
+                      <strong>{sharingAgents.map((a) => a.nickname).join(', ')}</strong>.
+                      Only this agent will be removed — the folder stays on disk.</>
+                  : <>Folder <code>projects/{agent.folderName}</code> can be deleted with the agent,
+                      or kept as an orphan so another agent can adopt it later.</>}
               </p>
               <div style={{ ...dialogStyles.actions, flexDirection: 'column', gap: 6 }}>
-                <button style={dialogStyles.btnDanger} onClick={removeWithFolder}>
-                  Delete agent and folder
-                </button>
+                {!folderIsShared && (
+                  <button style={dialogStyles.btnDanger} onClick={removeWithFolder}>
+                    Delete agent and folder
+                  </button>
+                )}
                 <button style={dialogStyles.btnSecondary} onClick={removeKeepingFolder}>
-                  Keep folder (agent becomes orphan)
+                  {folderIsShared ? 'Remove agent (keep folder)' : 'Keep folder (agent becomes orphan)'}
                 </button>
                 <button style={dialogStyles.btnSecondary} onClick={() => setRemoveDialog(null)}>
                   Cancel

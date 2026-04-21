@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CHAR_COUNT, CHAR_FRAME_W, CHAR_FRAME_H, FACING_ROW, getCachedCharacter, characterSpritePath } from '../utils/characterImageLoader';
-import { isFolderNameValid, listAgentFolders, createAgentFolder } from '../utils/agentFolders';
+import { isFolderNameValid, listAgentFolders, ensureAgentFolder } from '../utils/agentFolders';
 import { isTauri } from '../utils/tauri';
+
+export interface ExistingAgentSummary {
+  nickname: string;
+  folderName: string;
+}
 
 interface Props {
   onClose: () => void;
@@ -10,8 +15,11 @@ interface Props {
   adoptFolder?: string | null;
   /** Sprite IDs already used (to gray out) - optional. */
   usedSpriteIds?: number[];
-  /** Existing agent folder names (from useAgents) to prevent duplicates. */
-  existingFolderNames?: string[];
+  /**
+   * Existing agents. Used to detect when the user is about to share a folder
+   * with another agent so we can surface an info message (not a hard error).
+   */
+  existingAgents?: ExistingAgentSummary[];
 }
 
 function SpriteThumb({ spriteId, isHover }: { spriteId: number; isHover: boolean }) {
@@ -54,7 +62,7 @@ function SpriteThumb({ spriteId, isHover }: { spriteId: number; isHover: boolean
   return <canvas ref={canvasRef} style={{ width: 48, height: 64, imageRendering: 'pixelated' as const, display: 'block' }} />;
 }
 
-export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpriteIds, existingFolderNames }: Props) {
+export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpriteIds, existingAgents }: Props) {
   const [nickname, setNickname] = useState('');
   const [folderName, setFolderName] = useState(adoptFolder ?? '');
   const [spriteId, setSpriteId] = useState<number>(0);
@@ -69,26 +77,65 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
   }, []);
 
   const usedSet = useMemo(() => new Set(usedSpriteIds ?? []), [usedSpriteIds]);
-  const agentFolderSet = useMemo(
-    () => new Set((existingFolderNames ?? []).map((f) => f.toLowerCase())),
-    [existingFolderNames]
-  );
+  const agentFolderMap = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const a of existingAgents ?? []) {
+      const k = a.folderName.toLowerCase();
+      const arr = m.get(k) ?? [];
+      arr.push(a.nickname);
+      m.set(k, arr);
+    }
+    return m;
+  }, [existingAgents]);
 
-  const folderNameError = useMemo(() => {
-    if (adoptFolder) return null;
-    if (!folderName) return null;
+  // Derived state for the folder-name field.
+  //
+  // We now distinguish four cases:
+  //   - structural error  → hard block submit
+  //   - fresh new folder  → ensureAgentFolder will create it
+  //   - orphan on disk    → ensureAgentFolder is a no-op; first-owner semantics
+  //   - shared with other agent(s) → allowed, surface sharing info to the user
+  //
+  // Only structural errors are fatal; duplicate-folder is now an informational
+  // state, not a block, which enables "spawn N agents in the same directory".
+  const folderStatus = useMemo(() => {
+    if (adoptFolder) return { kind: 'adopt' as const };
+    if (!folderName) return { kind: 'empty' as const };
     const structural = isFolderNameValid(folderName);
-    if (structural) return structural;
+    if (structural) return { kind: 'error' as const, message: structural };
     const lower = folderName.toLowerCase();
-    if (agentFolderSet.has(lower)) return 'An agent with this folder already exists.';
-    if (existingFolders.some((f) => f.toLowerCase() === lower)) return 'Folder already exists on disk.';
-    return null;
-  }, [folderName, existingFolders, agentFolderSet, adoptFolder]);
+    const sharingWith = agentFolderMap.get(lower);
+    if (sharingWith && sharingWith.length > 0) {
+      return { kind: 'sharing' as const, nicknames: sharingWith };
+    }
+    if (existingFolders.some((f) => f.toLowerCase() === lower)) {
+      return { kind: 'orphan' as const };
+    }
+    return { kind: 'new' as const };
+  }, [folderName, existingFolders, agentFolderMap, adoptFolder]);
+
+  const folderNameError = folderStatus.kind === 'error' ? folderStatus.message : null;
+
+  // Combined list of folders the user might want to reuse: everything on disk
+  // plus any agent folder (covers cases where agents exist in storage but the
+  // disk listing hasn't resolved yet, e.g. browser build). Each entry carries
+  // metadata so the picker can show "used by X, Y" or "empty folder".
+  const folderOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const f of existingFolders) names.add(f);
+    for (const a of existingAgents ?? []) names.add(a.folderName);
+    return Array.from(names)
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => {
+        const nicknames = agentFolderMap.get(name.toLowerCase()) ?? [];
+        return { name, nicknames };
+      });
+  }, [existingFolders, existingAgents, agentFolderMap]);
 
   const canSubmit =
     nickname.trim().length > 0 &&
     nickname.trim().length <= 20 &&
-    (adoptFolder ? true : (folderName.length > 0 && folderNameError === null)) &&
+    (adoptFolder ? true : (folderName.length > 0 && folderStatus.kind !== 'error')) &&
     !submitting;
 
   const handleSubmit = useCallback(async () => {
@@ -102,7 +149,8 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
           setSubmitting(false);
           return;
         }
-        await createAgentFolder(folderName);
+        // Idempotent: creates the folder on first agent, reuses it thereafter.
+        await ensureAgentFolder(folderName);
       }
       onCreated({
         nickname: nickname.trim(),
@@ -151,19 +199,66 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
           <label style={styles.fieldLabel}>
             Folder name
             <input
-              style={{ ...styles.input, ...(folderNameError ? styles.inputError : {}) }}
+              style={{
+                ...styles.input,
+                ...(folderNameError ? styles.inputError : {}),
+                ...(folderStatus.kind === 'sharing' ? styles.inputInfo : {}),
+              }}
               placeholder="e.g. my-agent"
               value={folderName}
               disabled={!!adoptFolder}
               onChange={(e) => setFolderName(e.target.value.toLowerCase())}
             />
-            <span style={styles.hint}>
+            <span style={{
+              ...styles.hint,
+              ...(folderStatus.kind === 'sharing' ? styles.hintInfo : {}),
+            }}>
               {adoptFolder
                 ? 'Adopting an orphaned folder - cannot change.'
-                : folderNameError
-                ? folderNameError
+                : folderStatus.kind === 'error'
+                ? folderStatus.message
+                : folderStatus.kind === 'sharing'
+                ? `Shared with: ${folderStatus.nicknames.join(', ')}. Both agents will run in the same directory.`
+                : folderStatus.kind === 'orphan'
+                ? 'Folder already exists on disk — this agent will adopt it.'
                 : 'a-z, 0-9, "-", "_". Created once, cannot be renamed later.'}
             </span>
+            {/* Existing-folder picker: lets the user spawn the new agent into
+                a folder that's already in use (shared) or sitting on disk as
+                an orphan, without having to retype the name. */}
+            {!adoptFolder && folderOptions.length > 0 && (
+              <div style={styles.folderPicker}>
+                <span style={styles.folderPickerLabel}>Or reuse an existing folder:</span>
+                <div style={styles.folderChipRow}>
+                  {folderOptions.map((opt) => {
+                    const isSelected = folderName.toLowerCase() === opt.name.toLowerCase();
+                    const isShared = opt.nicknames.length > 0;
+                    return (
+                      <button
+                        key={opt.name}
+                        type="button"
+                        style={{
+                          ...styles.folderChip,
+                          ...(isShared ? styles.folderChipShared : styles.folderChipOrphan),
+                          ...(isSelected ? styles.folderChipSelected : {}),
+                        }}
+                        title={
+                          isShared
+                            ? `Used by: ${opt.nicknames.join(', ')}`
+                            : 'Empty folder on disk — will be adopted.'
+                        }
+                        onClick={() => setFolderName(opt.name.toLowerCase())}
+                      >
+                        <span style={styles.folderChipName}>{opt.name}</span>
+                        <span style={styles.folderChipMeta}>
+                          {isShared ? `${opt.nicknames.length} agent${opt.nicknames.length === 1 ? '' : 's'}` : 'orphan'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </label>
 
           <div style={styles.fieldLabel}>
@@ -238,7 +333,56 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--bg-surface)', color: 'var(--text-primary)', fontSize: 13,
   },
   inputError: { borderColor: '#ef5350' },
+  inputInfo: { borderColor: '#4fc3f7' },
   hint: { fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 },
+  hintInfo: { color: '#4fc3f7' },
+  folderPicker: {
+    marginTop: 6,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  folderPickerLabel: {
+    fontSize: 11,
+    color: 'var(--text-muted)',
+    fontWeight: 400,
+  },
+  folderChipRow: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    gap: 4,
+    maxHeight: 96,
+    overflowY: 'auto' as const,
+    padding: 2,
+  },
+  folderChip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 8px',
+    background: 'var(--bg-surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 999,
+    fontSize: 11,
+    color: 'var(--text-primary)',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  folderChipShared: {},
+  folderChipOrphan: { opacity: 0.75 },
+  folderChipSelected: {
+    borderColor: '#4fc3f7',
+    background: 'rgba(79, 195, 247, 0.12)',
+    color: '#4fc3f7',
+  },
+  folderChipName: { fontFamily: 'Menlo, Monaco, monospace' },
+  folderChipMeta: {
+    fontSize: 10,
+    color: 'var(--text-muted)',
+    padding: '1px 6px',
+    background: 'var(--bg-primary)',
+    borderRadius: 999,
+  },
   spriteGrid: {
     display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 4,
     padding: 8, background: 'var(--bg-surface)', borderRadius: 4,

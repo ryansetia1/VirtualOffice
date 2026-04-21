@@ -20,6 +20,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       agents::get_projects_root,
       agents::create_agent_folder,
+      agents::ensure_agent_folder,
       agents::delete_agent_folder,
       agents::list_agent_folders,
       agents::agent_folder_path,

@@ -16,6 +16,15 @@ export async function createAgentFolder(folderName: string): Promise<string> {
   return invokeSafe<string>('create_agent_folder', { folderName });
 }
 
+/**
+ * Idempotent counterpart to `createAgentFolder`. Returns the existing path if
+ * the folder is already on disk, otherwise creates it. Use this when more than
+ * one agent may legitimately point at the same project directory.
+ */
+export async function ensureAgentFolder(folderName: string): Promise<string> {
+  return invokeSafe<string>('ensure_agent_folder', { folderName });
+}
+
 export async function deleteAgentFolder(folderName: string): Promise<void> {
   return invokeSafe<void>('delete_agent_folder', { folderName });
 }
