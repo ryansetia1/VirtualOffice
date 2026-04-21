@@ -308,9 +308,9 @@ export default function LayersPanel({
         const effective = renderOrderApi.getOrder(singlePlacement);
         const assetDefault = renderOrderApi.getAssetOrder(singlePlacement.assetId);
         const orders: Array<{ value: 'auto' | 'above' | 'below'; label: string }> = [
-          { value: 'auto', label: 'Auto (follow y-sort)' },
-          { value: 'above', label: 'Always above agent' },
-          { value: 'below', label: 'Always below agent' },
+          { value: 'auto', label: 'Auto (depth-sorted)' },
+          { value: 'above', label: 'Always in front' },
+          { value: 'below', label: 'Always behind' },
         ];
         for (const { value, label } of orders) {
           items.push({

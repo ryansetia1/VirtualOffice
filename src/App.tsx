@@ -791,9 +791,9 @@ export default function App() {
           // marks the currently effective value. Clicking one writes the
           // placement-level override.
           const placementOrders: Array<{ value: RenderOrder; label: string }> = [
-            { value: 'auto', label: 'Auto (follow y-sort)' },
-            { value: 'above', label: 'Always above agent' },
-            { value: 'below', label: 'Always below agent' },
+            { value: 'auto', label: 'Auto (depth-sorted)' },
+            { value: 'above', label: 'Always in front' },
+            { value: 'below', label: 'Always behind' },
           ];
           for (const { value, label } of placementOrders) {
             items.push({

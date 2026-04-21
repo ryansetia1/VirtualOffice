@@ -1,19 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * Render-order override for object-layer placements.
+ * Render-order override for wall- and object-layer placements.
  *
- *   - `'auto'`   — follow the normal y-sort (placement's bottom edge vs agent's
- *                  foot row). This matches how Godot's YSort / Unity's 2D
- *                  Transparency Sort / Stardew Valley handle depth. An agent
- *                  that is visually "in front of" the object will render on
- *                  top of it; an agent "behind" it will be occluded. This is
- *                  the sensible default for every placement.
- *   - `'above'`  — always render after any agent, regardless of y-sort. Useful
- *                  for tall back walls, overhead signage, etc.
- *   - `'below'`  — always render before any agent. Useful for floor-level art
- *                  that the agent must stand on top of (rugs drawn on the
- *                  object layer, ground shadows, etc.).
+ *   - `'auto'`   — follow the normal y-sort (placement's bottom edge vs the
+ *                  bottom of the other items in the scene). This matches how
+ *                  Godot's YSort / Unity's 2D Transparency Sort / Stardew
+ *                  Valley handle depth: whatever is visually "in front of"
+ *                  another item renders on top of it. Sensible default.
+ *   - `'above'`  — always render *after* everything else in the stream, no
+ *                  matter the y-sort. Useful for overhead signage, hanging
+ *                  lamps, tall back walls that must cover objects below them.
+ *   - `'below'`  — always render *before* everything else in the stream.
+ *                  Useful for floor-level art on the object layer (rugs,
+ *                  ground shadows) or a plant that should sit behind the
+ *                  half-height wall it's placed on.
+ *
+ * The same three buckets apply to agents in the render stream (agents live
+ * in the auto bucket), so "above" means above walls + objects + agents, and
+ * "below" means below all three. Floor-layer placements always draw first
+ * and do not participate.
  *
  * Two scopes are tracked, paralleling the collision-mask API:
  *   - Asset-level (`Map<assetId, RenderOrder>`): default for every placement

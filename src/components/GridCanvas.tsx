@@ -412,30 +412,34 @@ export default function GridCanvas({
         return za - zb;
       });
 
-    // ── Unified y-sorted stream for the object layer + agents ────────────
+    // ── Unified y-sorted stream for walls + objects + agents ─────────────
     //
-    // Draw lower layers (floor, wall) first — they sit below everything and
-    // never participate in agent occlusion. Then build a single sorted stream
-    // mixing object-layer placements and agents so they y-sort against each
-    // other the way Godot's YSort / Unity 2D / Stardew Valley do: whoever's
-    // foot is lower on screen renders last (= visually in front).
+    // Floor is drawn first as a pure painter's-algorithm pass (it's always
+    // the bottom). Everything else — walls, objects, agents — goes through
+    // a single y-sorted stream so things Just Work the way Godot's YSort /
+    // Unity 2D / Stardew Valley handle depth: whoever's foot is lower on
+    // screen renders last (= visually in front).
     //
-    // The `getRenderOrder` hook lets the user pin a specific placement (or
-    // every placement of an asset) to always draw above or below agents,
-    // regardless of y-position. This covers the "tall back wall" and "floor
-    // art on object layer" edge cases without giving up the automatic,
-    // position-based occlusion that Just Works for everything else.
-    const nonObjectLayer: Placement[] = [];
-    const objectLayer: Placement[] = [];
+    // Putting walls in the same stream solves the "plant behind a half-
+    // height wall" problem: a plant whose pot sits at the top row of a wall
+    // naturally sorts *before* the wall (smaller `row + spanH`), so the
+    // wall draws on top and occludes the pot.
+    //
+    // The `getRenderOrder` hook is the escape hatch for cases where
+    // position-based sorting gets it wrong (tall back walls, floor art on
+    // the object layer, decorative hanging signs). It pins a specific
+    // placement (or every placement of an asset) to always draw in front of
+    // or behind everything else in the stream, regardless of y-position.
+    const floorLayer: Placement[] = [];
+    const sortedStreamPlacements: Placement[] = [];
     for (const p of sorted) {
       if (movingPlacement && p.id === movingPlacement.placement.id) continue;
-      if (p.layer === 'object') objectLayer.push(p);
-      else nonObjectLayer.push(p);
+      if (p.layer === 'floor') floorLayer.push(p);
+      else sortedStreamPlacements.push(p);
     }
 
-    // Floor + wall, painter's-algorithm style (already sorted by layer then
-    // z-index above).
-    for (const p of nonObjectLayer) {
+    // Floor, painter's-algorithm style (already sorted by z-index above).
+    for (const p of floorLayer) {
       drawAsset(ctx, p.assetId, p.col, p.row, 1, p.rotation, p.flipH, p.flipV);
     }
 
@@ -444,19 +448,31 @@ export default function GridCanvas({
       | { kind: 'agent'; bucket: 0 | 1 | 2; sortY: number; stableIdx: number; data: Agent };
 
     const stream: StreamItem[] = [];
-    // Placements: bucket 0 = 'below agent', 1 = 'auto', 2 = 'above agent'.
-    // Within a bucket we y-sort by natural bottom edge so two objects keep
-    // their normal relative depth.
-    for (let i = 0; i < objectLayer.length; i++) {
-      const p = objectLayer[i];
+    // Placements (walls + objects): bucket 0 = 'always behind', 1 = 'auto',
+    // 2 = 'always in front'. Within a bucket we y-sort by natural bottom
+    // edge so two items keep their normal relative depth.
+    //
+    // Note: we deliberately ignore `zIndex` as a sort key in the stream.
+    // `reorderPlacementsBulk` / `bringToFront` / `sendToBack` write `zIndex`
+    // values in small ranges (10, 20, 30, …) — when we previously used
+    // `p.zIndex ?? (row+spanH)*1000` those small integers dominated the
+    // sort key and dragged placements across y-depth, which broke the
+    // "tall back wall covers the desks in front of it" invariant. The
+    // initial `sorted` array that feeds `sortedStreamPlacements` is still
+    // zIndex-aware, so zIndex continues to act as a *tiebreaker* for items
+    // at identical y (via `stableIdx`). Users who want to pin a placement
+    // outside its natural depth should use the `RenderOrder` override
+    // (`Always in front` / `Always behind`) instead.
+    for (let i = 0; i < sortedStreamPlacements.length; i++) {
+      const p = sortedStreamPlacements[i];
       const order = getRenderOrder?.(p) ?? 'auto';
       const bucket: 0 | 1 | 2 = order === 'below' ? 0 : order === 'above' ? 2 : 1;
-      const natural = p.zIndex ?? (p.row + p.spanH) * 1000;
+      const natural = (p.row + p.spanH) * 1000;
       stream.push({ kind: 'placement', bucket, sortY: natural, stableIdx: i, data: p });
     }
-    // Agents live in the auto bucket — their sort key is the foot row so they
-    // y-sort against object-layer placements naturally (`row + 1 == spanH`
-    // for a 1-cell footprint, matching the placement convention).
+    // Agents live in the auto bucket — their sort key is the foot row so
+    // they y-sort against object/wall placements naturally (`row + 1 ==
+    // spanH` for a 1-cell footprint, matching the placement convention).
     if (readOnly && agents && agents.length > 0) {
       for (let i = 0; i < agents.length; i++) {
         const a = agents[i];
