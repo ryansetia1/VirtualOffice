@@ -29,7 +29,7 @@ import DragOverlay from './components/DragOverlay';
 import LiveHeader from './components/LiveHeader';
 import AddAgentModal from './components/AddAgentModal';
 import ContextMenu, { type MenuItem } from './components/ContextMenu';
-import TerminalPanel from './components/TerminalPanel';
+import TerminalPanel, { FloatingTerminalWindow, TerminalView } from './components/TerminalPanel';
 
 type AppTab = 'live' | 'build' | 'assets';
 
@@ -63,25 +63,68 @@ export default function App() {
   const [spriteDialog, setSpriteDialog] = useState<{ id: string } | null>(null);
   const [removeDialog, setRemoveDialog] = useState<{ id: string } | null>(null);
   const [openTerminalIds, setOpenTerminalIds] = useState<string[]>([]);
-  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
+  // IDs in this set are shown as independent floating windows; the rest go into the docked panel.
+  const [floatingTerminalIds, setFloatingTerminalIds] = useState<Set<string>>(new Set());
+  // Hidden terminals stay mounted (PTY alive) but are invisible. Double-clicking the agent un-hides.
+  const [hiddenTerminalIds, setHiddenTerminalIds] = useState<Set<string>>(new Set());
+  const [activeDockedTerminalId, setActiveDockedTerminalId] = useState<string | null>(null);
+  // Track which floating window was last clicked so it renders on top.
+  const [focusedTerminalId, setFocusedTerminalId] = useState<string | null>(null);
+  // Slots are chrome-owned DOM nodes that host xterm. Kept in state so
+  // `<TerminalView>` re-renders with the right `target` when chrome mounts.
+  const [dockedSlot, setDockedSlot] = useState<HTMLDivElement | null>(null);
+  const [floatingSlots, setFloatingSlots] = useState<Map<string, HTMLDivElement>>(new Map());
+  const setFloatingSlotEl = useCallback((id: string, el: HTMLDivElement | null) => {
+    setFloatingSlots((prev) => {
+      const existing = prev.get(id) ?? null;
+      if (existing === el) return prev;
+      const next = new Map(prev);
+      if (el) next.set(id, el); else next.delete(id);
+      return next;
+    });
+  }, []);
 
   const openAgentTerminal = useCallback((agentId: string) => {
     if (!isTauri()) {
       window.alert('Terminals require the desktop app. Run "npm run tauri:dev".');
       return;
     }
-    setOpenTerminalIds((prev) => (prev.includes(agentId) ? prev : [...prev, agentId]));
-    setActiveTerminalId(agentId);
+    setOpenTerminalIds((prev) => {
+      if (prev.includes(agentId)) {
+        // Already open — keep its docked/floating state, just un-hide it.
+        return prev;
+      }
+      // First open → start as a floating window.
+      setFloatingTerminalIds((f) => new Set([...f, agentId]));
+      return [...prev, agentId];
+    });
+    setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
+    setFocusedTerminalId(agentId);
   }, []);
 
   const closeAgentTerminal = useCallback((agentId: string) => {
     setOpenTerminalIds((prev) => prev.filter((id) => id !== agentId));
-    setActiveTerminalId((cur) => {
-      if (cur !== agentId) return cur;
-      const remaining = openTerminalIds.filter((id) => id !== agentId);
-      return remaining.length > 0 ? remaining[remaining.length - 1] : null;
-    });
-  }, [openTerminalIds]);
+    setFloatingTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
+    setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
+    setActiveDockedTerminalId((cur) => cur === agentId ? null : cur);
+    setFocusedTerminalId((cur) => cur === agentId ? null : cur);
+  }, []);
+
+  const hideTerminal = useCallback((id: string) => {
+    setHiddenTerminalIds((prev) => new Set([...prev, id]));
+  }, []);
+
+  const floatTerminal = useCallback((id: string) => {
+    setFloatingTerminalIds((prev) => new Set([...prev, id]));
+    setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    setFocusedTerminalId(id);
+  }, []);
+
+  const dockTerminal = useCallback((id: string) => {
+    setFloatingTerminalIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    setActiveDockedTerminalId(id);
+  }, []);
 
   const [initialRoom] = useState(loadInitialRoom);
   const {
@@ -550,16 +593,81 @@ export default function App() {
           })
           .filter((t): t is { id: string; agent: typeof agentsApi.agents[number] } => t !== null);
         if (openTerminals.length === 0) return null;
-        const activeId = activeTerminalId && openTerminals.some((t) => t.id === activeTerminalId)
-          ? activeTerminalId
-          : openTerminals[openTerminals.length - 1].id;
+
+        const dockedTerminals = openTerminals.filter((t) => !floatingTerminalIds.has(t.id));
+        const floatingTerminals = openTerminals.filter((t) => floatingTerminalIds.has(t.id));
+
+        // Which docked terminal is *currently visible* in the docked slot.
+        const visibleDocked = dockedTerminals.filter((t) => !hiddenTerminalIds.has(t.id));
+        const activeDockedId =
+          activeDockedTerminalId && visibleDocked.some((t) => t.id === activeDockedTerminalId)
+            ? activeDockedTerminalId
+            : visibleDocked.length > 0 ? visibleDocked[visibleDocked.length - 1].id : null;
+
+        // Stagger initial positions so windows don't perfectly overlap
+        const stagger = (i: number) => ({
+          x: Math.max(20, Math.min(window.innerWidth  - 740, (window.innerWidth  - 720) / 2 + (i % 5) * 28)),
+          y: Math.max(20, Math.min(window.innerHeight - 440, (window.innerHeight - 420) / 2 + (i % 5) * 28)),
+        });
+
+        // Focused window renders on top; others share the base z-index
+        const zFor = (id: string, i: number) => id === focusedTerminalId ? 602 : 600 + (i % 2);
+
+        // Compute the current DOM host for each terminal. Null = park offscreen.
+        const targetFor = (id: string): HTMLElement | null => {
+          if (hiddenTerminalIds.has(id)) return null;
+          if (floatingTerminalIds.has(id)) return floatingSlots.get(id) ?? null;
+          return id === activeDockedId ? dockedSlot : null;
+        };
+        const isActive = (id: string): boolean => {
+          if (hiddenTerminalIds.has(id)) return false;
+          if (floatingTerminalIds.has(id)) return true;
+          return id === activeDockedId;
+        };
+
         return (
-          <TerminalPanel
-            terminals={openTerminals}
-            activeId={activeId}
-            onSetActive={setActiveTerminalId}
-            onClose={closeAgentTerminal}
-          />
+          <>
+            {/* Chrome: docked panel stays mounted whenever there's any docked
+                terminal (even if hidden) so its slot ref stays registered. */}
+            {dockedTerminals.length > 0 && (
+              <TerminalPanel
+                terminals={dockedTerminals}
+                hiddenIds={hiddenTerminalIds}
+                activeId={activeDockedId}
+                onSetActive={setActiveDockedTerminalId}
+                onHide={hideTerminal}
+                onFloat={floatTerminal}
+                setSlotEl={setDockedSlot}
+              />
+            )}
+            {/* Chrome: every floating window stays mounted (hidden via CSS
+                when `hidden` is true) so its slot stays registered. */}
+            {floatingTerminals.map((t, i) => (
+              <FloatingTerminalWindow
+                key={t.id}
+                terminal={t}
+                hidden={hiddenTerminalIds.has(t.id)}
+                zIndex={zFor(t.id, i)}
+                initialPos={stagger(openTerminalIds.indexOf(t.id))}
+                onHide={hideTerminal}
+                onDock={dockTerminal}
+                onFocus={setFocusedTerminalId}
+                setSlotEl={setFloatingSlotEl}
+              />
+            ))}
+            {/* Stable TerminalView list — one per open terminal. These never
+                unmount on dock ↔ float transitions; only `target` changes, so
+                xterm is reparented in the DOM without React remounting. */}
+            {openTerminals.map((t) => (
+              <TerminalView
+                key={t.id}
+                agent={t.agent}
+                target={targetFor(t.id)}
+                active={isActive(t.id)}
+                onAutoClose={() => closeAgentTerminal(t.id)}
+              />
+            ))}
+          </>
         );
       })()}
 
