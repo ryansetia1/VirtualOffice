@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash:mkdir",
+      "Bash:cd",
+      "Bash:ls",
+      "Read:/Users/ryan.setiawan/Downloads/VirtualOffice/projects/gaming-news/**",
+      "Edit:/Users/ryan.setiawan/Downloads/VirtualOffice/projects/gaming-news/**",
+      "WebSearch:**"
+    ]
+  }
+}

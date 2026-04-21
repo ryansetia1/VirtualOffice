@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gaming News - Berita Gaming Terkini</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    h1 {
+      color: #e94560;
+      font-size: 2.5rem;
+      margin-bottom: 10px;
+    }
+
+    .last-updated {
+      color: #a0a0a0;
+      font-size: 0.9rem;
+    }
+
+    .news-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 30px;
+    }
+
+    .news-card {
+      background: #0f3460;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .news-card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 15px 40px rgba(233, 69, 96, 0.2);
+    }
+
+    .news-image {
+      width: 100%;
+      height: 200px;
+      object-fit: cover;
+    }
+
+    .news-content {
+      padding: 20px;
+    }
+
+    .news-category {
+      display: inline-block;
+      background: #e94560;
+      color: white;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .news-source {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .source-logo {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      object-fit: contain;
+      background: #1a1a2e;
+      padding: 2px;
+    }
+
+    .source-name {
+      color: #808080;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .news-title {
+      color: #ffffff;
+      font-size: 1.25rem;
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+
+    .news-summary {
+      color: #a0a0a0;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      margin-bottom: 20px;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background: #e94560;
+      color: white;
+      padding: 12px 24px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: background 0.3s ease;
+    }
+
+    .cta-button:hover {
+      background: #ff6b6b;
+    }
+
+    @media (max-width: 768px) {
+      h1 {
+        font-size: 1.8rem;
+      }
+
+      .news-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🎮 Gaming News</h1>
+      <p class="last-updated" id="lastUpdated"></p>
+    </header>
+
+    <main id="newsContainer"></main>
+  </div>
+
+  <script>
+    // ============================================
+    // DATA BERITA - EDIT DI SINI UNTUK UPDATE
+    // ============================================
+    const beritaData = {
+      "lastUpdated": "2026-04-22T14:30:00+07:00",
+      "berita": [
+        {
+          "id": 1,
+          "judul": "Dragon Quest Smash/Grow Resmi Rilis di iOS & Android",
+          "ringkasan": "Square Enix meluncurkan roguelite RPG mobile gratis dengan combat cepat, Coup de Grâce attacks, dan co-op quest untuk 4 pemain.",
+          "kategori": "Mobile RPG",
+          "sumber": "https://www.gematsu.com/2026/04/dragon-quest-smash-grow-launches-april-21",
+          "media": "Gematsu",
+          "logo": "https://www.gematsu.com/favicon.ico",
+          "gambar": "https://via.placeholder.com/400x200?text=Dragon+Quest+Smash+Grow"
+        },
+        {
+          "id": 2,
+          "judul": "CTHULOOT - Game Co-op Horror Ringan Segera Hadir di PS5",
+          "ringkasan": "Pixelnest Studio & TyGAMES menghadirkan game arcade co-op 1-4 pemain dengan tema eldritch, 14 map unik, dan horror ramah keluarga.",
+          "kategori": "Indie",
+          "sumber": "https://www.gamespress.com/en-GB/CTHULOOT-is-coming-to-the-PlayStation-5-on-April-21-2026",
+          "media": "Games Press",
+          "logo": "https://www.gamespress.com/favicon.ico",
+          "gambar": "https://via.placeholder.com/400x200?text=CTHULOOT"
+        },
+        {
+          "id": 3,
+          "judul": "Elementallis - Action Adventure Retro Gaya Zelda Rilis 28 April",
+          "ringkasan": "Ankae Games menghadirkan game petualangan dengan combat magic elemen (Api, Air, Listrik), 8 kuil, dan 8 biome untuk dijelajahi di berbagai platform.",
+          "kategori": "Action Adventure",
+          "sumber": "https://monstervine.com/2026/04/elementallis-release-date-april-28/",
+          "media": "MonsterVine",
+          "logo": "https://monstervine.com/favicon.ico",
+          "gambar": "https://via.placeholder.com/400x200?text=Elementallis"
+        }
+      ]
+    };
+    // ============================================
+
+    function renderBerita() {
+      const lastUpdatedEl = document.getElementById('lastUpdated');
+      const container = document.getElementById('newsContainer');
+
+      // Tampilkan timestamp last updated
+      const formattedDate = new Date(beritaData.lastUpdated).toLocaleString('id-ID', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      lastUpdatedEl.textContent = `Terakhir diupdate: ${formattedDate}`;
+
+      // Render news cards
+      container.innerHTML = `
+        <div class="news-grid">
+          ${beritaData.berita.map(item => `
+            <article class="news-card">
+              <img src="${item.gambar}" alt="${item.judul}" class="news-image" onerror="this.src='https://via.placeholder.com/400x200?text=Gaming+News'">
+              <div class="news-content">
+                <span class="news-category">${item.kategori}</span>
+                <h2 class="news-title">${item.judul}</h2>
+                <p class="news-summary">${item.ringkasan}</p>
+                <a href="${item.sumber}" target="_blank" rel="noopener noreferrer" class="cta-button">
+                  Baca Selengkapnya →
+                </a>
+                <div class="news-source">
+                  <img src="${item.logo}" alt="${item.media}" class="source-logo" onerror="this.style.display='none'">
+                  <span class="source-name">${item.media}</span>
+                </div>
+              </div>
+            </article>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    // Render saat halaman siap
+    document.addEventListener('DOMContentLoaded', renderBerita);
+  </script>
+</body>
+</html>

@@ -13,6 +13,29 @@ export interface Agent {
   facing: Facing;
   animFrame: 0 | 1 | 2;
   createdAt: number;
+  /**
+   * Shell command to run automatically when the terminal first opens for
+   * this agent. Empty/undefined → no auto-command.
+   */
+  startCommand?: string;
+  /**
+   * Suffix appended to `startCommand` when the agent has a previous
+   * conversation. Example: if startCommand is `claude` and continueCommand
+   * is `--continue`, the terminal will run `claude --continue` on resume.
+   */
+  continueCommand?: string;
+  /**
+   * Optional regex source (no delimiters/flags) used to detect that the
+   * resumed session has no prior conversation and should fall back to the
+   * plain start command. If empty, a sensible default regex is used.
+   */
+  noConversationPattern?: string;
+  /**
+   * Flips to `true` after a terminal session for this agent exits. Enables
+   * the continue-command flow on subsequent opens. Reset to `false` when
+   * the fallback-detection fires, so the next open starts clean.
+   */
+  hasPreviousConversation?: boolean;
 }
 
 const STORAGE_KEY = 'virtualOffice_agents';
@@ -70,6 +93,10 @@ function normalizeAgent(raw: unknown): Agent | null {
     facing,
     animFrame,
     createdAt: typeof r.createdAt === 'number' ? r.createdAt : Date.now(),
+    startCommand: typeof r.startCommand === 'string' ? r.startCommand : undefined,
+    continueCommand: typeof r.continueCommand === 'string' ? r.continueCommand : undefined,
+    noConversationPattern: typeof r.noConversationPattern === 'string' ? r.noConversationPattern : undefined,
+    hasPreviousConversation: typeof r.hasPreviousConversation === 'boolean' ? r.hasPreviousConversation : false,
   };
 }
 
@@ -87,6 +114,15 @@ export interface AddAgentInput {
   spriteId: number;
   row: number;
   col: number;
+  startCommand?: string;
+  continueCommand?: string;
+  noConversationPattern?: string;
+}
+
+export interface AgentCommandsInput {
+  startCommand?: string;
+  continueCommand?: string;
+  noConversationPattern?: string;
 }
 
 export interface UseAgentsApi {
@@ -96,6 +132,8 @@ export interface UseAgentsApi {
   addAgent: (input: AddAgentInput) => Agent;
   renameAgent: (id: string, nickname: string) => void;
   setSpriteId: (id: string, spriteId: number) => void;
+  setAgentCommands: (id: string, commands: AgentCommandsInput) => void;
+  setHasPreviousConversation: (id: string, value: boolean) => void;
   moveAgent: (id: string, row: number, col: number, facing?: Facing, animFrame?: 0 | 1 | 2) => void;
   setFacing: (id: string, facing: Facing) => void;
   setAnimFrame: (id: string, animFrame: 0 | 1 | 2) => void;
@@ -130,6 +168,10 @@ export function useAgents(): UseAgentsApi {
       facing: 'down',
       animFrame: 1,
       createdAt: Date.now(),
+      startCommand: input.startCommand?.trim() || undefined,
+      continueCommand: input.continueCommand?.trim() || undefined,
+      noConversationPattern: input.noConversationPattern?.trim() || undefined,
+      hasPreviousConversation: false,
     };
     setAgents((prev) => [...prev, agent]);
     setActiveAgentId(agent.id);
@@ -142,6 +184,27 @@ export function useAgents(): UseAgentsApi {
 
   const setSpriteId = useCallback((id: string, spriteId: number) => {
     setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, spriteId } : a)));
+  }, []);
+
+  const setAgentCommands = useCallback((id: string, commands: AgentCommandsInput) => {
+    setAgents((prev) => prev.map((a) => (
+      a.id === id
+        ? {
+            ...a,
+            startCommand: commands.startCommand?.trim() || undefined,
+            continueCommand: commands.continueCommand?.trim() || undefined,
+            noConversationPattern: commands.noConversationPattern?.trim() || undefined,
+          }
+        : a
+    )));
+  }, []);
+
+  const setHasPreviousConversation = useCallback((id: string, value: boolean) => {
+    setAgents((prev) => prev.map((a) => (
+      a.id === id && a.hasPreviousConversation !== value
+        ? { ...a, hasPreviousConversation: value }
+        : a
+    )));
   }, []);
 
   const moveAgent = useCallback((id: string, row: number, col: number, facing?: Facing, animFrame?: 0 | 1 | 2) => {
@@ -184,6 +247,8 @@ export function useAgents(): UseAgentsApi {
     addAgent,
     renameAgent,
     setSpriteId,
+    setAgentCommands,
+    setHasPreviousConversation,
     moveAgent,
     setFacing,
     setAnimFrame,

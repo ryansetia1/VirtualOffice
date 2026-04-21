@@ -1,0 +1,29 @@
+{
+  "lastUpdated": "2026-04-22T10:00:00+07:00",
+  "berita": [
+    {
+      "id": 1,
+      "judul": "GTA VI Trailer Baru Pecahkan Rekor Views dalam 24 Jam",
+      "ringkasan": "Rockstar Games merilis trailer terbaru GTA VI yang langsung memecahkan rekor dengan 150 juta views dalam sehari.",
+      "kategori": "News",
+      "sumber": "https://www.rockstargames.com/newswire",
+      "gambar": "https://via.placeholder.com/400x200?text=GTA+VI"
+    },
+    {
+      "id": 2,
+      "judul": "Elden Ring DLC 'Shadow of the Erdtree' Dapat Rating ESRL",
+      "ringkasan": "DLC yang sangat dinantikan akhirnya mendapat rating ESRB, menandakan rilis sudah dekat.",
+      "kategori": "RPG",
+      "sumber": "https://www.fromsoftware.jp",
+      "gambar": "https://via.placeholder.com/400x200?text=Elden+Ring+DLC"
+    },
+    {
+      "id": 3,
+      "judul": "Nintendo Switch 2 Bocoran Spesifikasi Terbaru",
+      "ringkasan": "Bocoran terbaru mengungkap spesifikasi hardware Nintendo Switch 2 yang akan diumumkan bulan depan.",
+      "kategori": "Hardware",
+      "sumber": "https://www.nintendo.com",
+      "gambar": "https://via.placeholder.com/400x200?text=Switch+2"
+    }
+  ]
+}

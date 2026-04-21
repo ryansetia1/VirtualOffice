@@ -10,7 +10,14 @@ export interface ExistingAgentSummary {
 
 interface Props {
   onClose: () => void;
-  onCreated: (input: { nickname: string; folderName: string; spriteId: number }) => void;
+  onCreated: (input: {
+    nickname: string;
+    folderName: string;
+    spriteId: number;
+    startCommand?: string;
+    continueCommand?: string;
+    noConversationPattern?: string;
+  }) => void;
   /** Folder name pre-fill when adopting an orphan. If set, folder input is disabled. */
   adoptFolder?: string | null;
   /** Sprite IDs already used (to gray out) - optional. */
@@ -70,6 +77,12 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [existingFolders, setExistingFolders] = useState<string[]>([]);
+  // Auto-run command config. Collapsible to keep the modal compact for users
+  // who don't need it.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [startCommand, setStartCommand] = useState('');
+  const [continueCommand, setContinueCommand] = useState('');
+  const [noConversationPattern, setNoConversationPattern] = useState('');
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -156,12 +169,15 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
         nickname: nickname.trim(),
         folderName: adoptFolder ?? folderName,
         spriteId,
+        startCommand: startCommand.trim() || undefined,
+        continueCommand: continueCommand.trim() || undefined,
+        noConversationPattern: noConversationPattern.trim() || undefined,
       });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
-  }, [canSubmit, adoptFolder, folderName, nickname, spriteId, onCreated]);
+  }, [canSubmit, adoptFolder, folderName, nickname, spriteId, startCommand, continueCommand, noConversationPattern, onCreated]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -288,6 +304,59 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
             </div>
           </div>
 
+          {/* Advanced: auto-run commands. Collapsed by default so the modal
+              stays simple for users who don't need it. */}
+          <div style={styles.advancedSection}>
+            <button
+              type="button"
+              style={styles.advancedToggle}
+              onClick={() => setAdvancedOpen((v) => !v)}
+            >
+              <span>{advancedOpen ? '▾' : '▸'} Auto-run commands (optional)</span>
+            </button>
+            {advancedOpen && (
+              <div style={styles.advancedBody}>
+                <label style={styles.fieldLabel}>
+                  Start command
+                  <input
+                    style={styles.input}
+                    placeholder='e.g. claude'
+                    value={startCommand}
+                    onChange={(e) => setStartCommand(e.target.value)}
+                  />
+                  <span style={styles.hint}>
+                    Runs automatically in the terminal on first open.
+                  </span>
+                </label>
+                <label style={styles.fieldLabel}>
+                  Continue command
+                  <input
+                    style={styles.input}
+                    placeholder='e.g. --continue'
+                    value={continueCommand}
+                    onChange={(e) => setContinueCommand(e.target.value)}
+                  />
+                  <span style={styles.hint}>
+                    Appended to the start command when a previous conversation exists.
+                  </span>
+                </label>
+                <label style={styles.fieldLabel}>
+                  No-conversation pattern (regex)
+                  <input
+                    style={styles.input}
+                    placeholder='leave blank to use the default'
+                    value={noConversationPattern}
+                    onChange={(e) => setNoConversationPattern(e.target.value)}
+                  />
+                  <span style={styles.hint}>
+                    If this pattern appears in the terminal after the continue command,
+                    the agent falls back to the plain start command.
+                  </span>
+                </label>
+              </div>
+            )}
+          </div>
+
           {errorMsg && <div style={styles.error}>{errorMsg}</div>}
         </div>
 
@@ -382,6 +451,32 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '1px 6px',
     background: 'var(--bg-primary)',
     borderRadius: 999,
+  },
+  advancedSection: {
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    background: 'var(--bg-surface)',
+  },
+  advancedToggle: {
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '8px 10px',
+    background: 'transparent',
+    border: 'none',
+    color: 'var(--text-primary)',
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: 'pointer',
+    textAlign: 'left' as const,
+  },
+  advancedBody: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 10,
+    padding: '4px 10px 10px 10px',
+    borderTop: '1px solid var(--border)',
   },
   spriteGrid: {
     display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 4,

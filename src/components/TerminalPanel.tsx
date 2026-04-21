@@ -18,6 +18,21 @@ export interface OpenTerminal {
   agent: Agent;
 }
 
+// Default regex for detecting "no previous conversation" messages from common
+// AI CLI tools (Claude Code, Ollama, etc.). Users can override via each agent's
+// `noConversationPattern` field.
+const DEFAULT_NO_CONVERSATION_PATTERN =
+  'no (previous |saved |existing )?conversation|no session found|no previous session|unable to (find|locate|resume)|resume.{0,30}(failed|error)';
+
+function compilePattern(custom: string | undefined): RegExp {
+  const src = (custom && custom.trim()) || DEFAULT_NO_CONVERSATION_PATTERN;
+  try {
+    return new RegExp(src, 'i');
+  } catch {
+    return new RegExp(DEFAULT_NO_CONVERSATION_PATTERN, 'i');
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Parking element
 //
@@ -58,9 +73,21 @@ interface TerminalViewProps {
   /** True when this terminal is the currently-visible one in its chrome. */
   active: boolean;
   onAutoClose: () => void;
+  /**
+   * Called when the PTY exits for any reason not initiated by an explicit
+   * user reset. The parent uses this to promote the agent's conversation
+   * state to "has previous" so the next open uses the continue command.
+   */
+  onSessionEnded?: () => void;
+  /**
+   * Called when the pattern watcher sees the "no previous conversation"
+   * signal after running the continue command. The parent uses this to
+   * demote the agent back to "fresh" state so fallback sticks.
+   */
+  onPatternFallback?: () => void;
 }
 
-export function TerminalView({ agent, target, active, onAutoClose }: TerminalViewProps) {
+export function TerminalView({ agent, target, active, onAutoClose, onSessionEnded, onPatternFallback }: TerminalViewProps) {
   const sessionId = `agent:${agent.id}`;
 
   // The div we imperatively append to the current chrome slot. State so the
@@ -71,6 +98,29 @@ export function TerminalView({ agent, target, active, onAutoClose }: TerminalVie
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>('booting…');
+
+  // ── Auto-run command state machine ────────────────────────────────────────
+  //
+  // Phases:
+  //   'booting'          → PTY not ready yet; nothing sent
+  //   'running-continue' → continue-command was sent; pattern watcher active
+  //   'falling-back'     → pattern matched, sending Ctrl+C + start command
+  //   'user-controlled'  → either (a) no auto-command, (b) start command sent,
+  //                        or (c) user typed and cancelled the pattern watch
+  //
+  // We track phase via ref for synchronous access inside PTY handlers.
+  const phaseRef = useRef<'booting' | 'running-continue' | 'falling-back' | 'user-controlled'>('booting');
+  // Rolling buffer of recent PTY output as a decoded string, capped at 4 KB,
+  // used only while phaseRef.current === 'running-continue'. Match scope is
+  // kept small so an occasional match inside legitimate output much later
+  // can't retroactively trigger a fallback.
+  const bufferRef = useRef<string>('');
+  const patternRef = useRef<RegExp | null>(null);
+  // Latest command snapshot captured at mount so the fallback can replay the
+  // start command without re-reading agent (which may change mid-session
+  // after the user edits the commands dialog — intentionally not live).
+  const startCmdRef = useRef<string | null>(null);
+  const decoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
 
   // ── One-time setup: create host div, open xterm, spawn PTY ──────────────────
   useEffect(() => {
@@ -125,6 +175,14 @@ export function TerminalView({ agent, target, active, onAutoClose }: TerminalVie
 
       term.onData((data) => {
         if (state.disposed) return;
+        // User interaction cancels any pending auto-fallback: from this point
+        // on we treat the session as user-controlled, so a late "no conversation"
+        // match in output can't yank the terminal out from under them.
+        if (phaseRef.current === 'running-continue' && data.length > 0) {
+          phaseRef.current = 'user-controlled';
+          patternRef.current = null;
+          bufferRef.current = '';
+        }
         ptyWriteString(sessionId, data).catch((e) => console.warn('[terminal] write failed', e));
       });
       term.onBinary((data) => {
@@ -154,17 +212,93 @@ export function TerminalView({ agent, target, active, onAutoClose }: TerminalVie
         const safeCols = term.cols && term.cols > 2 ? term.cols : 100;
         const safeRows = term.rows && term.rows > 2 ? term.rows : 30;
         term.write(`\x1b[90m[projects/${agent.folderName}]\x1b[0m\r\n`);
+
+        // Capture the command config at mount. We intentionally snapshot here
+        // rather than reading `agent` live, because mid-session edits to the
+        // commands dialog should only apply to the NEXT open.
+        const startCmd = agent.startCommand?.trim() ?? '';
+        const contCmd = agent.continueCommand?.trim() ?? '';
+        const hasPrev = !!agent.hasPreviousConversation;
+        startCmdRef.current = startCmd || null;
+
+        // Fallback mechanics: user picked the "aggressive" option (Q3-a), so
+        // on pattern match we send Ctrl+C, then the plain start command after
+        // a short settle delay. Kept as a ref-bound closure so it can be
+        // re-triggered once without creating stale captures.
+        const triggerFallback = () => {
+          if (state.disposed) return;
+          if (phaseRef.current !== 'running-continue') return;
+          phaseRef.current = 'falling-back';
+          patternRef.current = null;
+          bufferRef.current = '';
+          // Mark the agent as "no previous conversation" so this session and
+          // future opens both treat it as fresh, matching Q4-a.
+          onPatternFallback?.();
+          term.writeln('\r\n\x1b[90m[no previous conversation — restarting fresh]\x1b[0m');
+          // Ctrl+C → brief wait → re-run plain start command.
+          ptyWriteBytes(sessionId, new Uint8Array([0x03]))
+            .catch(() => { /* ignore */ })
+            .then(() => new Promise((r) => setTimeout(r, 200)))
+            .then(() => {
+              if (state.disposed || !startCmd) return;
+              return ptyWriteString(sessionId, `${startCmd}\r`);
+            })
+            .then(() => {
+              if (state.disposed) return;
+              phaseRef.current = 'user-controlled';
+            })
+            .catch((e) => console.warn('[terminal] fallback failed', e));
+        };
+
         const closeChannel = await ptySpawn(sessionId, cwd, safeCols, safeRows, {
           onReady: () => {
             if (state.disposed) return;
             setStatusMsg('');
+            if (!startCmd) {
+              phaseRef.current = 'user-controlled';
+              return;
+            }
+            // Wait ~200ms so login shell rc files (.zshrc etc.) finish
+            // printing banner/prompt before we inject our command.
+            window.setTimeout(() => {
+              if (state.disposed) return;
+              if (hasPrev && contCmd) {
+                phaseRef.current = 'running-continue';
+                patternRef.current = compilePattern(agent.noConversationPattern);
+                bufferRef.current = '';
+                ptyWriteString(sessionId, `${startCmd} ${contCmd}\r`)
+                  .catch((e) => console.warn('[terminal] start+continue send failed', e));
+              } else {
+                phaseRef.current = 'user-controlled';
+                ptyWriteString(sessionId, `${startCmd}\r`)
+                  .catch((e) => console.warn('[terminal] start send failed', e));
+              }
+            }, 200);
           },
           onData: (bytes) => {
             if (state.disposed) return;
             term.write(bytes);
+            // While watching for the "no previous conversation" signal, keep
+            // a small rolling buffer of decoded output and test it on every
+            // chunk. 4 KB is plenty to catch any reasonable error line; if a
+            // tool splits the phrase across more than 4 KB of output, we'd
+            // rather miss a fallback than flip phases mid-conversation.
+            if (phaseRef.current === 'running-continue' && patternRef.current) {
+              const decoded = decoderRef.current.decode(bytes, { stream: true });
+              if (decoded) {
+                bufferRef.current = (bufferRef.current + decoded).slice(-4096);
+                if (patternRef.current.test(bufferRef.current)) {
+                  triggerFallback();
+                }
+              }
+            }
           },
           onExit: () => {
             if (state.disposed) return;
+            // Surface the exit to the parent so the conversation flag can be
+            // promoted to "has previous". Parent suppresses this when the
+            // exit was initiated by an explicit user-reset click.
+            onSessionEnded?.();
             term.writeln('\r\n\x1b[90m[session exited]\x1b[0m');
             window.setTimeout(() => onAutoClose(), 600);
           },
@@ -255,11 +389,12 @@ interface DockedPanelProps {
   onSetActive: (id: string) => void;
   onHide: (id: string) => void;
   onFloat: (id: string) => void;
+  onReset?: (id: string) => void;
   setSlotEl: (el: HTMLDivElement | null) => void;
 }
 
 export default function TerminalPanel({
-  terminals, hiddenIds, activeId, onSetActive, onHide, onFloat, setSlotEl,
+  terminals, hiddenIds, activeId, onSetActive, onHide, onFloat, onReset, setSlotEl,
 }: DockedPanelProps) {
   const [height, setHeight] = useState<number>(320);
   const resizingRef = useRef(false);
@@ -307,6 +442,15 @@ export default function TerminalPanel({
             onClick={() => onSetActive(t.id)}
           >
             <span style={styles.tabLabel}>{t.agent.nickname}</span>
+            {onReset && (t.agent.startCommand?.trim()) && (
+              <button
+                style={styles.iconBtn}
+                title="Restart with fresh conversation"
+                onClick={(e) => { e.stopPropagation(); onReset(t.id); }}
+              >
+                <ResetIcon />
+              </button>
+            )}
             <button
               style={styles.iconBtn}
               title="Float window"
@@ -345,11 +489,12 @@ interface FloatingWindowProps {
   onHide: (id: string) => void;
   onDock: (id: string) => void;
   onFocus: (id: string) => void;
+  onReset?: (id: string) => void;
   setSlotEl: (id: string, el: HTMLDivElement | null) => void;
 }
 
 export function FloatingTerminalWindow({
-  terminal, hidden, zIndex, initialPos, onHide, onDock, onFocus, setSlotEl,
+  terminal, hidden, zIndex, initialPos, onHide, onDock, onFocus, onReset, setSlotEl,
 }: FloatingWindowProps) {
   const [pos, setPos] = useState(initialPos);
   const [size, setSize] = useState({ w: FLOAT_W, h: FLOAT_H });
@@ -424,6 +569,11 @@ export function FloatingTerminalWindow({
         }}
       >
         <span style={styles.floatTitle}>{terminal.agent.nickname}</span>
+        {onReset && (terminal.agent.startCommand?.trim()) && (
+          <button style={styles.titleBtn} title="Restart with fresh conversation" onClick={() => onReset(terminal.id)}>
+            <ResetIcon />
+          </button>
+        )}
         <button style={styles.titleBtn} title="Dock to bottom" onClick={() => onDock(terminal.id)}>
           <DockIcon />
         </button>
@@ -475,6 +625,21 @@ function DockIcon() {
     <svg width="12" height="12" viewBox="0 0 14 14" fill="none" style={{ display: 'block' }}>
       <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.25" />
       <path d="M7 1v6M4 4l3 3 3-3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ResetIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" style={{ display: 'block' }}>
+      <path
+        d="M11.5 4.5a4.5 4.5 0 1 0 1 2.8"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <path d="M12 2v3h-3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

@@ -20,6 +20,7 @@ import { canAgentStandAt, findNearestWalkable, resolveAgentMove } from './utils/
 import { saveRoom, loadRoom } from './utils/roomStorage';
 import { exportProject, importProject } from './utils/projectFile';
 import { deleteAgentFolder } from './utils/agentFolders';
+import { ptyKill } from './utils/pty';
 import { isTauri } from './utils/tauri';
 import GridCanvas from './components/GridCanvas';
 import AssetPalette from './components/AssetPalette';
@@ -84,6 +85,12 @@ export default function App() {
   const [renameDialog, setRenameDialog] = useState<{ id: string; value: string } | null>(null);
   const [spriteDialog, setSpriteDialog] = useState<{ id: string } | null>(null);
   const [removeDialog, setRemoveDialog] = useState<{ id: string } | null>(null);
+  const [commandsDialog, setCommandsDialog] = useState<{
+    id: string;
+    startCommand: string;
+    continueCommand: string;
+    noConversationPattern: string;
+  } | null>(null);
   const [openTerminalIds, setOpenTerminalIds] = useState<string[]>([]);
   // IDs in this set are shown as independent floating windows; the rest go into the docked panel.
   const [floatingTerminalIds, setFloatingTerminalIds] = useState<Set<string>>(new Set());
@@ -148,6 +155,12 @@ export default function App() {
     setActiveDockedTerminalId(id);
   }, []);
 
+  // Pending reset flags: when the user clicks the "restart fresh" button in
+  // a terminal's chrome we kill the PTY *and* want to skip the default
+  // "session ended → mark has-previous" side-effect. The ref-set tracks
+  // agent IDs whose next PTY exit should be treated as user-initiated.
+  const pendingResetsRef = useRef<Set<string>>(new Set());
+
   const [initialRoom] = useState(loadInitialRoom);
   const {
     room, version, canUndo, canRedo, undo, redo, beginUndoBatch, endUndoBatch,
@@ -201,6 +214,26 @@ export default function App() {
     if (isFirstRender.current) { isFirstRender.current = false; return; }
     saveRoom(room);
   }, [room]);
+
+  const resetAgentConversation = useCallback((agentId: string) => {
+    pendingResetsRef.current.add(agentId);
+    agentsApi.setHasPreviousConversation(agentId, false);
+    ptyKill(`agent:${agentId}`).catch(() => { /* ignore */ });
+  }, [agentsApi]);
+
+  const handleSessionEnded = useCallback((agentId: string) => {
+    // A user-initiated reset already flipped the flag to false and we don't
+    // want the natural exit to then flip it back to true. One-shot consume.
+    if (pendingResetsRef.current.has(agentId)) {
+      pendingResetsRef.current.delete(agentId);
+      return;
+    }
+    agentsApi.setHasPreviousConversation(agentId, true);
+  }, [agentsApi]);
+
+  const handlePatternFallback = useCallback((agentId: string) => {
+    agentsApi.setHasPreviousConversation(agentId, false);
+  }, [agentsApi]);
 
   const handleExport = useCallback(() => {
     saveRoom(room);
@@ -713,6 +746,7 @@ export default function App() {
                 onSetActive={setActiveDockedTerminalId}
                 onHide={hideTerminal}
                 onFloat={floatTerminal}
+                onReset={resetAgentConversation}
                 setSlotEl={setDockedSlot}
               />
             )}
@@ -728,6 +762,7 @@ export default function App() {
                 onHide={hideTerminal}
                 onDock={dockTerminal}
                 onFocus={setFocusedTerminalId}
+                onReset={resetAgentConversation}
                 setSlotEl={setFloatingSlotEl}
               />
             ))}
@@ -741,6 +776,8 @@ export default function App() {
                 target={targetFor(t.id)}
                 active={isActive(t.id)}
                 onAutoClose={() => closeAgentTerminal(t.id)}
+                onSessionEnded={() => handleSessionEnded(t.id)}
+                onPatternFallback={() => handlePatternFallback(t.id)}
               />
             ))}
           </>
@@ -753,7 +790,7 @@ export default function App() {
           usedSpriteIds={agentsApi.agents.map((a) => a.spriteId)}
           existingAgents={agentsApi.agents.map((a) => ({ nickname: a.nickname, folderName: a.folderName }))}
           onClose={() => setAddAgentModal(null)}
-          onCreated={({ nickname, folderName, spriteId }) => {
+          onCreated={({ nickname, folderName, spriteId, startCommand, continueCommand, noConversationPattern }) => {
             const cx = Math.floor(room.width / 2);
             const cy = Math.floor(room.height / 2);
             const spot = findNearestWalkable(cy, cx, room, collisionApi) ?? { row: cy, col: cx };
@@ -763,6 +800,9 @@ export default function App() {
               spriteId,
               row: spot.row,
               col: spot.col,
+              startCommand,
+              continueCommand,
+              noConversationPattern,
             });
             setAddAgentModal(null);
             setOrphanRefreshKey((k) => k + 1);
@@ -940,6 +980,15 @@ export default function App() {
             onClick: () => setSpriteDialog({ id: agent.id }),
           },
           {
+            label: 'Edit auto-run commands…',
+            onClick: () => setCommandsDialog({
+              id: agent.id,
+              startCommand: agent.startCommand ?? '',
+              continueCommand: agent.continueCommand ?? '',
+              noConversationPattern: agent.noConversationPattern ?? '',
+            }),
+          },
+          {
             label: 'Remove agent…',
             danger: true,
             onClick: () => setRemoveDialog({ id: agent.id }),
@@ -1017,6 +1066,86 @@ export default function App() {
               </div>
               <div style={dialogStyles.actions}>
                 <button style={dialogStyles.btnSecondary} onClick={() => setSpriteDialog(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {commandsDialog && (() => {
+        const agent = agentsApi.agents.find((a) => a.id === commandsDialog.id);
+        if (!agent) return null;
+        const submit = () => {
+          agentsApi.setAgentCommands(agent.id, {
+            startCommand: commandsDialog.startCommand,
+            continueCommand: commandsDialog.continueCommand,
+            noConversationPattern: commandsDialog.noConversationPattern,
+          });
+          setCommandsDialog(null);
+        };
+        const resetConversation = () => {
+          agentsApi.setHasPreviousConversation(agent.id, false);
+        };
+        return (
+          <div style={dialogStyles.backdrop} onClick={() => setCommandsDialog(null)}>
+            <div style={{ ...dialogStyles.modal, width: 460 }} onClick={(e) => e.stopPropagation()}>
+              <h3 style={dialogStyles.title}>Auto-run commands — {agent.nickname}</h3>
+              <p style={dialogStyles.subtitle}>
+                These commands run automatically when the terminal opens for this agent.
+                Leave blank to disable.
+              </p>
+              <label style={dialogStyles.fieldLabel}>
+                Start command
+                <input
+                  autoFocus
+                  style={{ ...dialogStyles.input, marginBottom: 0 }}
+                  placeholder='e.g. claude'
+                  value={commandsDialog.startCommand}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, startCommand: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setCommandsDialog(null); }}
+                />
+              </label>
+              <label style={dialogStyles.fieldLabel}>
+                Continue command
+                <input
+                  style={{ ...dialogStyles.input, marginBottom: 0 }}
+                  placeholder='e.g. --continue'
+                  value={commandsDialog.continueCommand}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, continueCommand: e.target.value })}
+                />
+                <span style={dialogStyles.hint}>
+                  Appended to the start command when this agent has a previous conversation.
+                </span>
+              </label>
+              <label style={dialogStyles.fieldLabel}>
+                No-conversation pattern (regex)
+                <input
+                  style={{ ...dialogStyles.input, marginBottom: 0 }}
+                  placeholder='leave blank to use the default'
+                  value={commandsDialog.noConversationPattern}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, noConversationPattern: e.target.value })}
+                />
+                <span style={dialogStyles.hint}>
+                  If this pattern appears in the terminal after the continue command,
+                  the agent falls back to the plain start command.
+                </span>
+              </label>
+              <div style={dialogStyles.conversationRow}>
+                <span style={dialogStyles.conversationLabel}>
+                  Conversation state:{' '}
+                  <strong style={{ color: agent.hasPreviousConversation ? '#4fc3f7' : 'var(--text-muted)' }}>
+                    {agent.hasPreviousConversation ? 'has previous' : 'fresh'}
+                  </strong>
+                </span>
+                {agent.hasPreviousConversation && (
+                  <button style={dialogStyles.btnSecondarySmall} onClick={resetConversation}>
+                    Reset to fresh
+                  </button>
+                )}
+              </div>
+              <div style={dialogStyles.actions}>
+                <button style={dialogStyles.btnSecondary} onClick={() => setCommandsDialog(null)}>Cancel</button>
+                <button style={dialogStyles.btnPrimary} onClick={submit}>Save</button>
               </div>
             </div>
           </div>
@@ -1131,6 +1260,23 @@ const dialogStyles: Record<string, React.CSSProperties> = {
     background: 'var(--bg-primary)', border: '1px solid transparent', borderRadius: 4, cursor: 'pointer',
   },
   spriteTileSelected: { borderColor: 'var(--accent)', background: 'var(--accent-dim)' },
+  fieldLabel: {
+    display: 'flex', flexDirection: 'column' as const, gap: 4,
+    fontSize: 12, fontWeight: 500, color: 'var(--text-primary)',
+    marginBottom: 12,
+  },
+  hint: { fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 },
+  conversationRow: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: '8px 10px', background: 'var(--bg-surface)',
+    border: '1px solid var(--border)', borderRadius: 4,
+    marginBottom: 14,
+  },
+  conversationLabel: { fontSize: 12, color: 'var(--text-primary)' },
+  btnSecondarySmall: {
+    padding: '4px 10px', background: 'var(--bg-primary)', color: 'var(--text-primary)',
+    border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+  },
   actions: { display: 'flex', justifyContent: 'flex-end', gap: 8 },
   btnSecondary: {
     padding: '6px 14px', background: 'var(--bg-surface)', color: 'var(--text-primary)',
