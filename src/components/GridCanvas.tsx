@@ -50,9 +50,17 @@ interface Props {
   onFlipV?: () => void;
   agents?: Agent[];
   activeAgentId?: string | null;
+  /** Agent currently under the cursor (in live/read-only mode). When set,
+   *  that agent gets a warm glow ring under its feet to signal
+   *  "click to take over / double-click to open terminal". */
+  hoveredAgentId?: string | null;
   onActivateAgent?: (id: string) => void;
   onOpenAgentTerminal?: (id: string) => void;
   onAgentContextMenu?: (id: string, clientX: number, clientY: number) => void;
+  /** Fires whenever the agent under the cursor changes (null when the
+   *  pointer leaves the canvas or moves off every sprite). Only emitted
+   *  in read-only (live) mode. */
+  onAgentHover?: (id: string | null) => void;
   onPlacementContextMenu?: (placement: Placement, clientX: number, clientY: number) => void;
   /** Returns the effective render-order override for a placement:
    *    - `'auto'`  — follow normal y-sort (default).
@@ -113,9 +121,11 @@ export default function GridCanvas({
   onFlipV,
   agents,
   activeAgentId,
+  hoveredAgentId,
   onActivateAgent,
   onOpenAgentTerminal,
   onAgentContextMenu,
+  onAgentHover,
   onPlacementContextMenu,
   getRenderOrder,
   showNameplates = true,
@@ -158,6 +168,10 @@ export default function GridCanvas({
   agentsRef.current = agents;
   const activeAgentIdRef = useRef(activeAgentId ?? null);
   activeAgentIdRef.current = activeAgentId ?? null;
+  // Track the last-emitted hover id ourselves rather than reading it from the
+  // prop so we don't fire duplicate callbacks if the parent intentionally
+  // stays on the same hovered agent across prop updates.
+  const lastHoveredAgentRef = useRef<string | null>(null);
 
   // Cache of red-tinted offscreen canvases keyed by `PixelMask` reference.
   // Masks are immutable once decoded, so identity is a safe cache key. Cleared
@@ -516,6 +530,32 @@ export default function GridCanvas({
       const srcY = FACING_ROW[agent.facing] * CHAR_FRAME_H;
       const srcX = agent.animFrame * CHAR_FRAME_W;
 
+      // Hover glow ring — signals "click to take over, double-click to open
+      // terminal". Drawn underneath the active ring so both can co-exist on
+      // the currently-active-and-hovered agent (warm glow beneath a crisper
+      // blue selection ring on top).
+      if (agent.id === hoveredAgentId) {
+        const hoverRx = spriteW * 0.48;
+        const hoverRy = spriteW * 0.2;
+        const hoverCy = footY - hoverRy * 0.85;
+        ctx.save();
+        // Additive-ish layered ellipses simulate a soft bloom without
+        // requiring per-pixel compositing that would break with imageSmoothing
+        // disabled. Three passes, decreasing radius and increasing opacity.
+        ctx.fillStyle = 'rgba(255, 214, 128, 0.18)';
+        ctx.beginPath();
+        ctx.ellipse(centerX, hoverCy, hoverRx * 1.15, hoverRy * 1.15, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255, 214, 128, 0.28)';
+        ctx.beginPath();
+        ctx.ellipse(centerX, hoverCy, hoverRx, hoverRy, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 214, 128, 0.85)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // Active ring under feet.
       //   The ring must sit *within* the agent's cell — otherwise it visibly
       //   bleeds onto whatever is in the cell below (walls, floor tile, etc.)
@@ -850,7 +890,7 @@ export default function GridCanvas({
 
     ctx.restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
+  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
 
   // ── Camera follow active agent (read-only mode only) ─────────────────────
   // The camera target is *derived* from agent position (see `effectiveOffset`
@@ -1100,6 +1140,19 @@ export default function GridCanvas({
       const rect = containerRef.current?.getBoundingClientRect();
       if (rect) setCursorPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
 
+      // Agent hover tracking. The sprite extends vertically beyond the
+      // agent's cell, so we can't piggy-back on `cell` — it's null whenever
+      // the cursor is near the top of a sprite that overhangs the grid edge.
+      // `hitTestAgent` is explicitly pixel-accurate and cheap (O(n) with a
+      // handful of agents) so we call it on every pointer-move in readOnly.
+      if (readOnly && onAgentHover) {
+        const hitId = hitTestAgent(e.clientX, e.clientY);
+        if (hitId !== lastHoveredAgentRef.current) {
+          lastHoveredAgentRef.current = hitId;
+          onAgentHover(hitId);
+        }
+      }
+
       // Select mode: marquee or drag
       if (cell && toolState.mode === 'select') {
         if (selectMarquee) {
@@ -1132,7 +1185,7 @@ export default function GridCanvas({
         }
       }
     },
-    [isPanning, isPainting, toGrid, toolState, onAddPlacement, onRemovePlacementById, getPlacementAt, room.height, room.width, resolveSize, selectMarquee]
+    [isPanning, isPainting, toGrid, toolState, onAddPlacement, onRemovePlacementById, getPlacementAt, room.height, room.width, resolveSize, selectMarquee, readOnly, onAgentHover, hitTestAgent]
   );
 
   const handlePointerUp = useCallback(
@@ -1296,7 +1349,13 @@ export default function GridCanvas({
       setHoverCell(null);
       setCursorPos(null);
     }
-  }, [isPanning, isPainting, movingPlacement, marqueeStart]);
+    // Always clear the hovered agent when the pointer leaves the canvas —
+    // the agent should resume wandering even if we're mid-drag elsewhere.
+    if (lastHoveredAgentRef.current !== null) {
+      lastHoveredAgentRef.current = null;
+      onAgentHover?.(null);
+    }
+  }, [isPanning, isPainting, movingPlacement, marqueeStart, onAgentHover]);
 
   // ── HTML Drag & Drop (from asset palette) ──────────────────────────────────
   const handleDragEnter = useCallback((e: DragEvent<HTMLCanvasElement>) => {

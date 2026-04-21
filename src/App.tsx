@@ -4,6 +4,7 @@ import { useTool } from './hooks/useTool';
 import { useAssetCategories } from './hooks/useAssetCategories';
 import { useCustomAssets } from './hooks/useCustomAssets';
 import { useAgents } from './hooks/useAgents';
+import { useWanderLoop } from './hooks/useWanderLoop';
 import { useCollisionMasks } from './hooks/useCollisionMasks';
 import { useRenderOrderOverrides, type RenderOrder } from './hooks/useRenderOrderOverrides';
 import { preloadAllAssets } from './utils/imageLoader';
@@ -91,6 +92,11 @@ export default function App() {
     continueCommand: string;
     noConversationPattern: string;
   } | null>(null);
+  // Agent hovered in the live grid. Used both for the visual glow and for
+  // suspending the wander loop while the pointer is over the sprite so the
+  // user can line up a click / double-click / context-menu without chasing
+  // a moving target.
+  const [hoveredAgentId, setHoveredAgentId] = useState<string | null>(null);
   const [openTerminalIds, setOpenTerminalIds] = useState<string[]>([]);
   // IDs in this set are shown as independent floating windows; the rest go into the docked panel.
   const [floatingTerminalIds, setFloatingTerminalIds] = useState<Set<string>>(new Set());
@@ -113,6 +119,13 @@ export default function App() {
     });
   }, []);
 
+  // Wander hook API is populated below via useWanderLoop; these handlers
+  // reach it through a ref set further down so the callbacks stay stable.
+  const wanderApiRef = useRef<{
+    pauseAgent: (id: string) => void;
+    resumeAgent: (id: string, delayMs?: number) => void;
+  } | null>(null);
+
   const openAgentTerminal = useCallback((agentId: string) => {
     if (!isTauri()) {
       window.alert('Terminals require the desktop app. Run "npm run tauri:dev".');
@@ -129,6 +142,10 @@ export default function App() {
     });
     setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
     setFocusedTerminalId(agentId);
+    // Freeze wandering for as long as the terminal is open — letting the
+    // agent drift away from the cursor while the user is actively reading
+    // their terminal would be more jarring than useful.
+    wanderApiRef.current?.pauseAgent(agentId);
   }, []);
 
   const closeAgentTerminal = useCallback((agentId: string) => {
@@ -137,6 +154,7 @@ export default function App() {
     setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
     setActiveDockedTerminalId((cur) => cur === agentId ? null : cur);
     setFocusedTerminalId((cur) => cur === agentId ? null : cur);
+    wanderApiRef.current?.resumeAgent(agentId, 600);
   }, []);
 
   const hideTerminal = useCallback((id: string) => {
@@ -344,6 +362,29 @@ export default function App() {
   const collisionRef = useRef(collisionApi);
   collisionRef.current = collisionApi;
 
+  // ── Autonomous wandering ────────────────────────────────────────────────
+  // The wander hook owns its own RAF loop and only moves agents with
+  // `autonomous === true`. It gates on `enabledRef` so nothing animates
+  // off the live tab, and exposes pause/resume/kick hooks that this
+  // component wires into hover, WASD, and open-terminal events below.
+  const wanderEnabledRef = useRef(activeTab === 'live');
+  wanderEnabledRef.current = activeTab === 'live';
+  const wander = useWanderLoop({
+    agentsApi,
+    roomRef,
+    masksRef: collisionRef,
+    enabledRef: wanderEnabledRef,
+  });
+  // The WASD effect mounts once with an empty dep array to keep the RAF
+  // loop alive across re-renders; surface wander through a ref so that
+  // closure can always reach the current pause/resume functions.
+  const wanderRef = useRef(wander);
+  wanderRef.current = wander;
+  // openAgentTerminal / closeAgentTerminal are defined above (so they can be
+  // wrapped in stable `useCallback`s) — mirror the wander api into their
+  // shared ref now that `wander` exists.
+  wanderApiRef.current = wander;
+
   const heldKeysRef = useRef<Set<string>>(new Set());
   const rafRef = useRef<number | null>(null);
   const lastFrameRef = useRef<number>(0);
@@ -396,6 +437,11 @@ export default function App() {
 
         const next = resolveAgentMove(active.row, active.col, stepY, stepX, roomRef.current, collisionRef.current);
 
+        // Refresh the wander-pause window every frame the user is steering,
+        // so letting go of WASD starts a clean 5-second countdown rather
+        // than racing the keydown we kicked at press time.
+        wanderRef.current?.kickTakeoverTimer(active.id);
+
         // Facing based on dominant axis of requested movement
         let facing: Facing = active.facing;
         if (Math.abs(dx) > Math.abs(dy)) {
@@ -429,9 +475,14 @@ export default function App() {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key !== 'w' && key !== 'a' && key !== 's' && key !== 'd') return;
-      if (!agentsApiRef.current.activeAgentId) return;
+      const activeId = agentsApiRef.current.activeAgentId;
+      if (!activeId) return;
       e.preventDefault();
       heldKeysRef.current.add(key);
+      // Suspend the wander loop for this agent. Every WASD keydown refreshes
+      // the grace window so wander stays paused for as long as the user is
+      // actively driving — then resumes 5s after the last input.
+      wanderRef.current?.kickTakeoverTimer(activeId);
       startLoop();
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -516,9 +567,21 @@ export default function App() {
               onZoomChange={setLiveZoom}
               agents={agentsApi.agents}
               activeAgentId={agentsApi.activeAgentId}
+              hoveredAgentId={hoveredAgentId}
               onActivateAgent={agentsApi.setActive}
               onOpenAgentTerminal={openAgentTerminal}
               onAgentContextMenu={(id, x, y) => setAgentCtx({ id, x, y })}
+              onAgentHover={(id) => {
+                setHoveredAgentId((prev) => {
+                  if (prev === id) return prev;
+                  // Un-hover the previous agent with a short grace so the
+                  // sprite doesn't twitch away from the cursor the instant
+                  // it slides off a pixel-imperfect boundary.
+                  if (prev) wander.resumeAgent(prev, 400);
+                  if (id) wander.pauseAgent(id);
+                  return id;
+                });
+              }}
               getRenderOrder={renderOrderApi.getOrder}
               collisionDebug={collisionDebug}
               getPlacementCollisionMask={collisionApi.getEffectiveMaskFor}
@@ -966,10 +1029,16 @@ export default function App() {
       {agentCtx && (() => {
         const agent = agentsApi.agents.find((a) => a.id === agentCtx.id);
         if (!agent) return null;
+        const isAutonomous = agent.autonomous === true;
         const items: MenuItem[] = [
           {
             label: 'Open Terminal',
             onClick: () => openAgentTerminal(agent.id),
+          },
+          {
+            // Radio-style indicator mirrors the render-order menu entries.
+            label: `${isAutonomous ? '●' : '○'} Wander otomatis`,
+            onClick: () => agentsApi.setAgentAutonomous(agent.id, !isAutonomous),
           },
           {
             label: 'Rename nickname…',

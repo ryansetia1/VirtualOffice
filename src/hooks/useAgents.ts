@@ -36,6 +36,14 @@ export interface Agent {
    * the fallback-detection fires, so the next open starts clean.
    */
   hasPreviousConversation?: boolean;
+  /**
+   * When true, the agent wanders the room autonomously on the live tab —
+   * random-walking with momentum and occasional idle pauses. Hover, click,
+   * WASD, or an open terminal suspends the wander; resumes after a short
+   * idle window. New agents default to `true`; migrated (older) agents
+   * default to `false` to avoid surprising the user.
+   */
+  autonomous?: boolean;
 }
 
 const STORAGE_KEY = 'virtualOffice_agents';
@@ -97,6 +105,9 @@ function normalizeAgent(raw: unknown): Agent | null {
     continueCommand: typeof r.continueCommand === 'string' ? r.continueCommand : undefined,
     noConversationPattern: typeof r.noConversationPattern === 'string' ? r.noConversationPattern : undefined,
     hasPreviousConversation: typeof r.hasPreviousConversation === 'boolean' ? r.hasPreviousConversation : false,
+    // Migrated agents default to `false` — users who created agents before
+    // wandering existed shouldn't suddenly see them scatter on reload.
+    autonomous: typeof r.autonomous === 'boolean' ? r.autonomous : false,
   };
 }
 
@@ -134,6 +145,7 @@ export interface UseAgentsApi {
   setSpriteId: (id: string, spriteId: number) => void;
   setAgentCommands: (id: string, commands: AgentCommandsInput) => void;
   setHasPreviousConversation: (id: string, value: boolean) => void;
+  setAgentAutonomous: (id: string, value: boolean) => void;
   moveAgent: (id: string, row: number, col: number, facing?: Facing, animFrame?: 0 | 1 | 2) => void;
   setFacing: (id: string, facing: Facing) => void;
   setAnimFrame: (id: string, animFrame: 0 | 1 | 2) => void;
@@ -172,6 +184,9 @@ export function useAgents(): UseAgentsApi {
       continueCommand: input.continueCommand?.trim() || undefined,
       noConversationPattern: input.noConversationPattern?.trim() || undefined,
       hasPreviousConversation: false,
+      // Newly created agents wander by default so the office feels alive
+      // from the moment the user spawns someone in.
+      autonomous: true,
     };
     setAgents((prev) => [...prev, agent]);
     setActiveAgentId(agent.id);
@@ -203,6 +218,14 @@ export function useAgents(): UseAgentsApi {
     setAgents((prev) => prev.map((a) => (
       a.id === id && a.hasPreviousConversation !== value
         ? { ...a, hasPreviousConversation: value }
+        : a
+    )));
+  }, []);
+
+  const setAgentAutonomous = useCallback((id: string, value: boolean) => {
+    setAgents((prev) => prev.map((a) => (
+      a.id === id && (a.autonomous ?? false) !== value
+        ? { ...a, autonomous: value }
         : a
     )));
   }, []);
@@ -249,6 +272,7 @@ export function useAgents(): UseAgentsApi {
     setSpriteId,
     setAgentCommands,
     setHasPreviousConversation,
+    setAgentAutonomous,
     moveAgent,
     setFacing,
     setAnimFrame,
