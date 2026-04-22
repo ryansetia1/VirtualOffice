@@ -38,16 +38,21 @@ Built with **React 19 + TypeScript + Vite** on the frontend and **Rust + Tauri 2
 ### Live mode — Agents
 
 - **40 built-in character sprite sheets** (64×128 sheets, 20×32 frames, 4 directions × 3 animation columns).
-- **Add an agent** with a nickname (editable), a fixed project folder name, a sprite, and a spawn cell.
-- **WASD / arrow keys** to move the active agent a cell at a time, `E` to interact (reserved).
+- **Add an agent** with a nickname (editable), a project folder (**new or existing** — multiple agents can share one folder so you can run e.g. `claude` + a cron-style checker in the same repo), a sprite, and a spawn cell. Optional per-agent **auto-run commands** and regex overrides are set here too.
+- **Autonomous wandering**: new agents walk around the room on their own by default — momentum-biased random walk with idle pauses, respecting the same pixel-accurate collision as WASD movement. Toggle per-agent via "Wander otomatis" in the context menu.
+- **Hover-to-pause, click-to-take-over**: hover an agent to freeze its wander (warm glow ring under its feet signals "I'm waiting for you"); single-click to activate the follow-camera; WASD steers it; the wander loop auto-resumes ~5 s after your last keystroke if you go idle. Double-click opens the embedded terminal.
+- **Deselection made easy**: click empty space, re-click the active agent, re-click its chip in the Live header, or press `Escape` — the camera unlocks and every agent goes back to wandering.
 - **Pixel-accurate collision**: walls still block whole cells, but object-layer placements are tested against per-asset pixel masks, so agents can slip through any transparent gap — including user-painted holes — and rotations/flips carry the mask correctly.
-- **Damped follow-camera** that kicks in only when the room is larger than the viewport on a given axis — fully zoomed out, the camera stays still and the agent walks across the full view.
+- **Damped follow-camera** that kicks in only when the room is larger than the viewport on a given axis and only while an agent is active. Fully zoomed out (or with no active agent), the camera is free.
 - **Nameplate** with active-agent ring for quick identification.
 
 ### Live mode — Embedded terminal (desktop only)
 
 - **Double-click an agent** to open a terminal tab docked at the bottom of the window.
 - Each agent has its own PTY session rooted at its project folder (`<projects-root>/<folderName>/`), running your login shell (`$SHELL -l -i`).
+- **Auto-run commands** — per-agent `startCommand` (e.g. `claude`) fires when the session boots. If a previous conversation exists, `continueCommand` (e.g. `--continue`) is appended automatically. A regex watcher detects "no previous conversation" messages and falls back to a fresh `startCommand` via `Ctrl+C` so you never get stuck at a dead resume prompt. Optimistic state tracking survives app crashes.
+- **Thinking bubble on the sprite** — an animated 3-dot speech bubble appears above the agent whenever its terminal is actively producing output (spinners, "Thinking…", progress lines). 500 ms minimum-visible + 1500 ms idle timeout tuned so it reads as "working" without flickering.
+- **Error / warning badge** — a red pulsing `!` badge pins to the top-right of the sprite when the terminal emits API errors, rate limits, exceptions, etc. Hover the agent to see the actual error line as a tooltip. Cleared automatically when you open the terminal (acknowledge), the agent becomes busy again (recovered), or after 10 minutes stale.
 - Output streams over a typed **Tauri `Channel`**, not brittle named events.
 - Tabs can be resized, closed, and re-opened; the shell stays alive across resizes.
 
@@ -109,10 +114,11 @@ npm run lint
 2. **Layers panel (left)** — toggle layer visibility/lock, rename layers, reorder placements, and manage groups.
 3. **Assets tab** — organize your asset library: create categories, rename assets, upload custom tilesheets, and define per-tile overrides.
 4. **Live tab**
-   - Add an agent from the side panel (nickname + project folder + sprite + spawn cell).
-   - Click an agent to make it active; move with `WASD` / arrows.
-   - **Double-click** an agent to open its terminal (desktop only).
-   - Rename / swap sprite / remove agents from the side panel.
+   - Add an agent from the side panel (nickname, **new or existing** project folder, sprite, spawn cell, optional auto-run commands & regex patterns).
+   - Agents wander around on their own by default. **Hover** to pause one; **click** to activate the follow-camera; move with `WASD` / arrows; the wander loop auto-resumes a few seconds after you stop steering.
+   - Press `Escape`, click empty space, or re-click the active agent / chip to **deselect** — the camera unlocks and everyone goes back to wandering.
+   - **Double-click** an agent to open its terminal (desktop only). If a `startCommand` is configured, it runs automatically. A thinking bubble over the sprite means the tool is working; a red `!` badge means it hit an error — hover to see the message.
+   - Rename / swap sprite / edit auto-run commands / toggle wandering / remove agents via right-click or the side panel.
 5. **Export / Import** — use the toolbar buttons to save the entire project to a `.json` file or load one. Agents and blocking overrides are included.
 
 ### Keyboard Shortcuts
@@ -125,7 +131,9 @@ npm run lint
 | `W / A / S / D` | Move active agent (Live tab) |
 | Arrow keys | Move active agent (Live tab) |
 | `E` | Interact (Live tab, reserved) |
+| `Escape` | Deselect active agent, unlock camera (Live tab) |
 | `Double-click agent` | Open embedded terminal (desktop build) |
+| Hover agent | Pause its wandering + show warm glow ring |
 
 Shortcuts are suppressed when an input/textarea — or the embedded xterm — has focus.
 
@@ -146,7 +154,7 @@ VirtualOffice/
 │   ├── main.tsx              # React entry point
 │   ├── index.css             # Global theme + tab styles
 │   ├── components/           # GridCanvas, Toolbar, LayersPanel, TerminalPanel, AgentsPanel, etc.
-│   ├── hooks/                # useGrid, useTool, useAssetCategories, useCustomAssets, useAgents, useCollisionMasks
+│   ├── hooks/                # useGrid, useTool, useAssetCategories, useCustomAssets, useAgents, useCollisionMasks, useWanderLoop
 │   ├── data/assetManifest.ts # Built-in asset catalog + tile-occupancy patterns
 │   └── utils/                # imageLoader, characterImageLoader, agentCollision, pixelMasks,
 │                             # agentFolders, assetFiles, pty, tauri, roomStorage, projectFile
@@ -169,7 +177,7 @@ VirtualOffice/
 - **`Placement`** — `{ id, assetId, row, col, layer, spanW, spanH, rotation, flipH, flipV, zIndex?, groupId? }`
 - **`PlacementGroup`** — `{ id, name, layer, visible, locked, collapsed }`
 - **`RoomState`** — grid `width`/`height`, `cellSize` (48), `placements[]`, `groups[]`, and per-layer `visibility` / `locked` / `names`.
-- **`Agent`** — `{ id, nickname, folderName, spriteId, row, col, facing, animFrame, createdAt }`. `folderName` is immutable after creation and maps to an on-disk project folder; `nickname` is free-form.
+- **`Agent`** — `{ id, nickname, folderName, spriteId, row, col, facing, animFrame, createdAt, autonomous?, startCommand?, continueCommand?, noConversationPattern?, busyPattern?, errorPattern?, hasPreviousConversation? }`. `folderName` maps to an on-disk project folder and **can be shared** by multiple agents; `nickname` is free-form. The command/pattern fields power the auto-run flow, thinking bubble, and error badge in Live mode.
 
 All project state lives in `localStorage`:
 
@@ -202,6 +210,8 @@ These same keys are what `exportProject()` bundles into a single JSON file.
 - Agent-to-agent "conversations" hooked into the `E` interact key
 - Configurable agent speed / diagonal movement / pathfinding
 - Richer terminal tooling (search, split panes, copy-on-select toggle)
+- Smarter wander goals (seek coffee machine, group around whiteboard, nap on couch)
+- More sprite overlays (speech balloons on `stdout` prompts, progress-bar rings for long runs)
 
 ## License
 
