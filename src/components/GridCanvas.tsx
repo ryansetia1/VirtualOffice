@@ -54,6 +54,14 @@ interface Props {
    *  that agent gets a warm glow ring under its feet to signal
    *  "click to take over / double-click to open terminal". */
   hoveredAgentId?: string | null;
+  /** Agents whose terminal currently reports a "busy" signal (thinking,
+   *  editing, running, etc.). Used to paint an animated thinking bubble
+   *  above each sprite. Lookup-only; the component never mutates. */
+  busyAgentIds?: Record<string, true>;
+  /** Agents that have a pending error/warning from their terminal.
+   *  Renders a red "!" badge at the top-right of the sprite; the message
+   *  surfaces as a tooltip when that agent is hovered. */
+  errorAgents?: Record<string, { message: string; at: number }>;
   onActivateAgent?: (id: string) => void;
   /** Fires when the user clicks empty space (or re-clicks the active agent)
    *  in live/read-only mode. Parent typically responds by clearing the
@@ -126,6 +134,8 @@ export default function GridCanvas({
   agents,
   activeAgentId,
   hoveredAgentId,
+  busyAgentIds,
+  errorAgents,
   onActivateAgent,
   onDeactivateAgent,
   onOpenAgentTerminal,
@@ -150,6 +160,32 @@ export default function GridCanvas({
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const [marqueeStart, setMarqueeStart] = useState<{ row: number; col: number } | null>(null);
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
+  // Monotonic tick bumped at ~30fps while any agent is busy. Feeds the
+  // render effect as a dep so the thinking-bubble dots stay animated even
+  // when nothing else on screen is changing (idle sprites, static camera).
+  const [busyTick, setBusyTick] = useState(0);
+  const hasBusy = !!(busyAgentIds && Object.keys(busyAgentIds).length > 0);
+  const hasError = !!(errorAgents && Object.keys(errorAgents).length > 0);
+  // RAF loop is shared between the thinking-bubble dots and the error-
+  // badge pulse. Runs as long as either overlay needs animating so we
+  // don't double-register.
+  const needsAnim = hasBusy || hasError;
+  useEffect(() => {
+    if (!needsAnim) return;
+    let raf = 0;
+    let last = 0;
+    const tick = (ts: number) => {
+      // ~30fps cadence is plenty for 3-dot animation and halves the CPU
+      // cost vs. redrawing on every vsync.
+      if (ts - last >= 33) {
+        last = ts;
+        setBusyTick((v) => (v + 1) & 0x3fffffff);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [needsAnim]);
 
   // Select mode state -- use refs for drag to avoid stale closure issues
   const [selectMarquee, setSelectMarquee] = useState<{ startRow: number; startCol: number; endRow: number; endCol: number } | null>(null);
@@ -629,6 +665,250 @@ export default function GridCanvas({
         ctx.fillText(label, tx, ty + padY * 0.2);
         ctx.restore();
       }
+
+      // Thinking bubble — a small speech bubble floating above the sprite
+      // with 3 dots that breathe out of phase. Drawn last so it sits on top
+      // of nameplates and any overlapping object sprites from the y-sort.
+      if (busyAgentIds && busyAgentIds[agent.id]) {
+        // Sprite-local scale so the bubble shrinks with zoom rather than
+        // floating detached. Clamped to a minimum so it stays legible at
+        // far zoom-outs but never explodes past the sprite at close range.
+        const bubbleScale = Math.max(0.7, Math.min(1.4, cellPx / TILE_PX));
+        const bubbleW = 34 * bubbleScale;
+        const bubbleH = 18 * bubbleScale;
+        // Place the bubble above whatever's already above the sprite
+        // (nameplate or the sprite's own top edge), with a small gap.
+        const nameplateH = showNameplates && cellPx >= 24 ? Math.max(14, Math.round(cellPx * 0.32)) + 4 : 0;
+        const bubbleCy = destY - nameplateH - bubbleH / 2 - 4 * bubbleScale;
+        const bubbleCx = centerX + spriteW * 0.18; // offset slightly right so tail points at the sprite's head
+        const bubbleX = bubbleCx - bubbleW / 2;
+        const bubbleY = bubbleCy - bubbleH / 2;
+        const radius = Math.min(bubbleH / 2, 8 * bubbleScale);
+
+        ctx.save();
+        // Bubble shadow — subtle drop shadow for lift, cheap because it's
+        // just a single offset ellipse rather than canvas shadowBlur.
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(bubbleX + 1, bubbleY + 2, bubbleW, bubbleH, radius);
+        } else {
+          ctx.rect(bubbleX + 1, bubbleY + 2, bubbleW, bubbleH);
+        }
+        ctx.fill();
+
+        // Bubble body
+        ctx.fillStyle = 'rgba(245, 247, 252, 0.98)';
+        ctx.strokeStyle = 'rgba(20, 24, 34, 0.7)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(bubbleX, bubbleY, bubbleW, bubbleH, radius);
+        } else {
+          ctx.rect(bubbleX, bubbleY, bubbleW, bubbleH);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        // Tail — a small triangle pointing down-left toward the sprite's
+        // head. Two triangles actually: fill (white) and stroke that
+        // joins the bubble outline so the outline doesn't cross the tail.
+        const tailBaseY = bubbleY + bubbleH - 0.5;
+        const tailTipX = bubbleCx - bubbleW * 0.28;
+        const tailTipY = tailBaseY + 6 * bubbleScale;
+        const tailBaseLeft = tailTipX + 2 * bubbleScale;
+        const tailBaseRight = tailTipX + 8 * bubbleScale;
+        ctx.beginPath();
+        ctx.moveTo(tailBaseLeft, tailBaseY);
+        ctx.lineTo(tailTipX, tailTipY);
+        ctx.lineTo(tailBaseRight, tailBaseY);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(245, 247, 252, 0.98)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(20, 24, 34, 0.7)';
+        ctx.beginPath();
+        ctx.moveTo(tailBaseLeft, tailBaseY);
+        ctx.lineTo(tailTipX, tailTipY);
+        ctx.lineTo(tailBaseRight, tailBaseY);
+        ctx.stroke();
+
+        // 3 animated dots — each dot's alpha + vertical offset is phased
+        // by 1/3 of the cycle so they bounce in sequence (left-to-right).
+        // Cycle is ~900ms which reads as "thinking" without being frantic.
+        const now = performance.now();
+        const cycle = 900;
+        const dotR = 2.1 * bubbleScale;
+        const dotSpacing = 7 * bubbleScale;
+        const dotsCenterX = bubbleCx;
+        const dotsBaseY = bubbleCy;
+        for (let i = 0; i < 3; i++) {
+          // Phase of this dot in [0, 1). Normalised so dot 0 starts at 0.
+          const phase = ((now / cycle) - i / 3) % 1;
+          const p = phase < 0 ? phase + 1 : phase;
+          // Sine-based bounce: 0 → up → 0 over the first half, idle rest.
+          const bounce = p < 0.5 ? Math.sin(p * Math.PI * 2) : 0;
+          const dotY = dotsBaseY - bounce * 2.5 * bubbleScale;
+          const dotX = dotsCenterX + (i - 1) * dotSpacing;
+          const alpha = 0.35 + (p < 0.5 ? Math.sin(p * Math.PI) * 0.6 : 0);
+          ctx.fillStyle = `rgba(20, 24, 34, ${alpha.toFixed(3)})`;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // Error badge — red circle with white "!" pinned to the sprite's
+      // top-right corner. Co-exists with the thinking bubble (they occupy
+      // different positions) so a sprite can simultaneously signal
+      // "I'm working" + "heads up, something errored earlier".
+      if (errorAgents && errorAgents[agent.id]) {
+        const badgeScale = Math.max(0.7, Math.min(1.3, cellPx / TILE_PX));
+        const badgeR = 8 * badgeScale;
+        // Anchor to the upper-right of the sprite's visible rect, nudged
+        // slightly inward so it doesn't clip on very cramped zoom levels.
+        const badgeCx = destX + spriteW - badgeR * 0.6;
+        const badgeCy = destY + badgeR * 0.8;
+        // Pulse: 1.0 → 1.12 → 1.0 over 1400ms. Sine-based so it breathes
+        // rather than snaps. Amplitude is deliberately small — the color
+        // is already loud, so we don't need the geometry to shout too.
+        const pulsePhase = (performance.now() % 1400) / 1400;
+        const pulse = 1 + Math.sin(pulsePhase * Math.PI * 2) * 0.06 + 0.06;
+        const r = badgeR * pulse;
+
+        ctx.save();
+        // Outer soft glow. Radial gradient would be costlier and not
+        // meaningfully prettier at this size, so we fake it with two
+        // concentric translucent disks.
+        ctx.fillStyle = 'rgba(239, 83, 80, 0.22)';
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy, r * 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(239, 83, 80, 0.35)';
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy, r * 1.4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Badge body
+        ctx.fillStyle = '#ef5350';
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // "!" glyph — drawn as a vertical bar + a dot rather than using
+        // a text glyph, so we don't depend on a bold font being present
+        // and rendering is pixel-stable across zoom levels.
+        ctx.fillStyle = '#ffffff';
+        const barW = Math.max(1.5, r * 0.26);
+        const barH = r * 0.9;
+        const barX = badgeCx - barW / 2;
+        const barTop = badgeCy - barH * 0.55;
+        // Shaft
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(barX, barTop, barW, barH * 0.7, barW * 0.4);
+        } else {
+          ctx.rect(barX, barTop, barW, barH * 0.7);
+        }
+        ctx.fill();
+        // Dot
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy + barH * 0.35, barW * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // Error tooltip — renders the stored error message above the hovered
+    // agent's sprite (if that agent currently has an error). Drawn after
+    // the y-sorted stream so it sits on top of every sprite. Word-wrap
+    // is naive (greedy) but enough for a single ~120-char message split
+    // across at most 3 lines.
+    if (hoveredAgentId && errorAgents && errorAgents[hoveredAgentId] && agents) {
+      const hovered = agents.find((a) => a.id === hoveredAgentId);
+      const err = errorAgents[hoveredAgentId];
+      if (hovered && err) {
+        const centerX = (hovered.col + 0.5) * cellPx;
+        const footY = (hovered.row + 1) * cellPx;
+        const destY = footY - spriteH;
+        const fontSize = Math.max(11, Math.round(cellPx * 0.22));
+        ctx.save();
+        ctx.font = `500 ${fontSize}px system-ui, sans-serif`;
+        ctx.textBaseline = 'top';
+        // Greedy word-wrap to keep the tooltip narrow enough to be
+        // readable without running off-screen on small rooms.
+        const maxLineW = Math.min(320, Math.max(140, cellPx * 5));
+        const words = err.message.split(/\s+/);
+        const lines: string[] = [];
+        let current = '';
+        for (const w of words) {
+          const candidate = current ? `${current} ${w}` : w;
+          if (ctx.measureText(candidate).width <= maxLineW) {
+            current = candidate;
+          } else {
+            if (current) lines.push(current);
+            current = w;
+          }
+          // Cap at 3 lines — if the remaining words still don't fit,
+          // truncate with an ellipsis rather than growing forever.
+          if (lines.length >= 3) break;
+        }
+        if (current && lines.length < 3) lines.push(current);
+        if (lines.length === 3 && current !== lines[2]) {
+          lines[2] = lines[2].replace(/.{0,3}$/, '…');
+        }
+
+        const padX = 8, padY = 6, lineGap = 3;
+        let widest = 0;
+        for (const l of lines) widest = Math.max(widest, ctx.measureText(l).width);
+        const boxW = widest + padX * 2;
+        const boxH = lines.length * fontSize + (lines.length - 1) * lineGap + padY * 2;
+        // Position above the sprite, clamped so the box never leaves the
+        // visible grid bounds. A small 6px gap above the sprite keeps
+        // it visually attached without overlapping the nameplate.
+        const nameplateH = showNameplates && cellPx >= 24 ? Math.max(14, Math.round(cellPx * 0.32)) + 4 : 0;
+        let boxX = centerX - boxW / 2;
+        let boxY = destY - nameplateH - boxH - 6;
+        const gridW = room.width * cellPx;
+        if (boxX < 4) boxX = 4;
+        if (boxX + boxW > gridW - 4) boxX = gridW - 4 - boxW;
+        if (boxY < 4) boxY = destY + spriteH + 6; // flip below sprite if no room above
+
+        // Shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(boxX + 1, boxY + 2, boxW, boxH, 6);
+        } else {
+          ctx.rect(boxX + 1, boxY + 2, boxW, boxH);
+        }
+        ctx.fill();
+
+        // Box
+        ctx.fillStyle = 'rgba(28, 18, 20, 0.96)';
+        ctx.strokeStyle = 'rgba(239, 83, 80, 0.85)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+        } else {
+          ctx.rect(boxX, boxY, boxW, boxH);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        // Text
+        ctx.fillStyle = '#ffd2d0';
+        let ty = boxY + padY;
+        for (const line of lines) {
+          ctx.fillText(line, boxX + padX, ty);
+          ty += fontSize + lineGap;
+        }
+        ctx.restore();
+      }
     }
 
     // ── Collision-debug overlay ────────────────────────────────────────────
@@ -895,7 +1175,7 @@ export default function GridCanvas({
 
     ctx.restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
+  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, busyAgentIds, errorAgents, busyTick, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
 
   // ── Camera follow active agent (read-only mode only) ─────────────────────
   // The camera target is *derived* from agent position (see `effectiveOffset`

@@ -93,12 +93,70 @@ export default function App() {
     startCommand: string;
     continueCommand: string;
     noConversationPattern: string;
+    busyPattern: string;
+    errorPattern: string;
   } | null>(null);
   // Agent hovered in the live grid. Used both for the visual glow and for
   // suspending the wander loop while the pointer is over the sprite so the
   // user can line up a click / double-click / context-menu without chasing
   // a moving target.
   const [hoveredAgentId, setHoveredAgentId] = useState<string | null>(null);
+  // Agents whose terminal has flagged an active busy signal (thinking,
+  // editing, running, etc.). We keep this as a plain object keyed by agent
+  // id rather than a Set so GridCanvas gets a stable-shape prop whose
+  // identity changes only when the set actually changes.
+  const [busyAgentIds, setBusyAgentIds] = useState<Record<string, true>>({});
+  // Per-agent latest detected error. Keyed by agent id. When a new error
+  // arrives we bump `at` so the sprite can restart its pulse animation and
+  // the stale-expiry timer resets. Cleared when:
+  //   - the user opens that agent's terminal (they'll see the error there)
+  //   - the agent becomes "busy" again (tool recovered / moved on)
+  //   - 10 minutes pass without a fresh error (stale — cleared by sweeper)
+  const [errorAgents, setErrorAgents] = useState<Record<string, { message: string; at: number }>>({});
+  const handleBusyChange = useCallback((agentId: string, busy: boolean) => {
+    setBusyAgentIds((prev) => {
+      const has = !!prev[agentId];
+      if (busy === has) return prev;
+      if (busy) return { ...prev, [agentId]: true };
+      const { [agentId]: _omit, ...rest } = prev;
+      void _omit;
+      return rest;
+    });
+    // Busy = the tool is producing again, so any prior error alert is
+    // considered resolved. We don't wait for the user to open the terminal
+    // in this case since the visual cue no longer reflects reality.
+    if (busy) {
+      setErrorAgents((prev) => {
+        if (!prev[agentId]) return prev;
+        const { [agentId]: _omit, ...rest } = prev;
+        void _omit;
+        return rest;
+      });
+    }
+  }, []);
+  const handleErrorDetected = useCallback((agentId: string, message: string) => {
+    setErrorAgents((prev) => ({ ...prev, [agentId]: { message, at: Date.now() } }));
+  }, []);
+  // Stale-error sweeper. Runs at 30s intervals; cheap compared to anything
+  // else on the main loop. 10 minutes is long enough that a user stepping
+  // away briefly still sees the badge when they come back, but short
+  // enough that a never-acknowledged error from yesterday doesn't linger.
+  useEffect(() => {
+    const STALE_MS = 10 * 60 * 1000;
+    const id = window.setInterval(() => {
+      setErrorAgents((prev) => {
+        const now = Date.now();
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (now - v.at >= STALE_MS) { changed = true; continue; }
+          next[k] = v;
+        }
+        return changed ? next : prev;
+      });
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   const [openTerminalIds, setOpenTerminalIds] = useState<string[]>([]);
   // IDs in this set are shown as independent floating windows; the rest go into the docked panel.
   const [floatingTerminalIds, setFloatingTerminalIds] = useState<Set<string>>(new Set());
@@ -144,6 +202,15 @@ export default function App() {
     });
     setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
     setFocusedTerminalId(agentId);
+    // Opening the terminal counts as acknowledging any pending error
+    // badge — the user is about to see (or just saw) the actual message
+    // in the terminal, so the alert has served its purpose.
+    setErrorAgents((prev) => {
+      if (!prev[agentId]) return prev;
+      const { [agentId]: _omit, ...rest } = prev;
+      void _omit;
+      return rest;
+    });
     // Freeze wandering for as long as the terminal is open — letting the
     // agent drift away from the cursor while the user is actively reading
     // their terminal would be more jarring than useful.
@@ -590,6 +657,8 @@ export default function App() {
               agents={agentsApi.agents}
               activeAgentId={agentsApi.activeAgentId}
               hoveredAgentId={hoveredAgentId}
+              busyAgentIds={busyAgentIds}
+              errorAgents={errorAgents}
               onActivateAgent={agentsApi.setActive}
               onDeactivateAgent={() => agentsApi.setActive(null)}
               onOpenAgentTerminal={openAgentTerminal}
@@ -865,6 +934,8 @@ export default function App() {
                 onSessionEnded={() => handleSessionEnded(t.id)}
                 onPatternFallback={() => handlePatternFallback(t.id)}
                 onSessionStarted={() => handleSessionStarted(t.id)}
+                onBusyChange={(busy) => handleBusyChange(t.id, busy)}
+                onErrorDetected={(message) => handleErrorDetected(t.id, message)}
               />
             ))}
           </>
@@ -877,7 +948,7 @@ export default function App() {
           usedSpriteIds={agentsApi.agents.map((a) => a.spriteId)}
           existingAgents={agentsApi.agents.map((a) => ({ nickname: a.nickname, folderName: a.folderName }))}
           onClose={() => setAddAgentModal(null)}
-          onCreated={({ nickname, folderName, spriteId, startCommand, continueCommand, noConversationPattern }) => {
+          onCreated={({ nickname, folderName, spriteId, startCommand, continueCommand, noConversationPattern, busyPattern, errorPattern }) => {
             const cx = Math.floor(room.width / 2);
             const cy = Math.floor(room.height / 2);
             const spot = findNearestWalkable(cy, cx, room, collisionApi) ?? { row: cy, col: cx };
@@ -890,6 +961,8 @@ export default function App() {
               startCommand,
               continueCommand,
               noConversationPattern,
+              busyPattern,
+              errorPattern,
             });
             setAddAgentModal(null);
             setOrphanRefreshKey((k) => k + 1);
@@ -1079,6 +1152,8 @@ export default function App() {
               startCommand: agent.startCommand ?? '',
               continueCommand: agent.continueCommand ?? '',
               noConversationPattern: agent.noConversationPattern ?? '',
+              busyPattern: agent.busyPattern ?? '',
+              errorPattern: agent.errorPattern ?? '',
             }),
           },
           {
@@ -1173,6 +1248,8 @@ export default function App() {
             startCommand: commandsDialog.startCommand,
             continueCommand: commandsDialog.continueCommand,
             noConversationPattern: commandsDialog.noConversationPattern,
+            busyPattern: commandsDialog.busyPattern,
+            errorPattern: commandsDialog.errorPattern,
           });
           setCommandsDialog(null);
         };
@@ -1221,6 +1298,32 @@ export default function App() {
                 <span style={dialogStyles.hint}>
                   If this pattern appears in the terminal after the continue command,
                   the agent falls back to the plain start command.
+                </span>
+              </label>
+              <label style={dialogStyles.fieldLabel}>
+                Busy pattern (regex)
+                <input
+                  style={{ ...dialogStyles.input, marginBottom: 0 }}
+                  placeholder='leave blank to use the default'
+                  value={commandsDialog.busyPattern}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, busyPattern: e.target.value })}
+                />
+                <span style={dialogStyles.hint}>
+                  When this pattern appears in the terminal, a thinking bubble is shown
+                  over the agent sprite. Default matches spinners and common "Thinking…" lines.
+                </span>
+              </label>
+              <label style={dialogStyles.fieldLabel}>
+                Error pattern (regex)
+                <input
+                  style={{ ...dialogStyles.input, marginBottom: 0 }}
+                  placeholder='leave blank to use the default'
+                  value={commandsDialog.errorPattern}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, errorPattern: e.target.value })}
+                />
+                <span style={dialogStyles.hint}>
+                  When this pattern matches a terminal line, a red "!" badge appears on
+                  the sprite. Cleared when you open the terminal or the agent becomes busy again.
                 </span>
               </label>
               <div style={dialogStyles.conversationRow}>

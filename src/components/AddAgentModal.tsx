@@ -17,6 +17,8 @@ interface Props {
     startCommand?: string;
     continueCommand?: string;
     noConversationPattern?: string;
+    busyPattern?: string;
+    errorPattern?: string;
   }) => void;
   /** Folder name pre-fill when adopting an orphan. If set, folder input is disabled. */
   adoptFolder?: string | null;
@@ -83,6 +85,8 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
   const [startCommand, setStartCommand] = useState('');
   const [continueCommand, setContinueCommand] = useState('');
   const [noConversationPattern, setNoConversationPattern] = useState('');
+  const [busyPattern, setBusyPattern] = useState('');
+  const [errorPattern, setErrorPattern] = useState('');
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -172,12 +176,14 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
         startCommand: startCommand.trim() || undefined,
         continueCommand: continueCommand.trim() || undefined,
         noConversationPattern: noConversationPattern.trim() || undefined,
+        busyPattern: busyPattern.trim() || undefined,
+        errorPattern: errorPattern.trim() || undefined,
       });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
-  }, [canSubmit, adoptFolder, folderName, nickname, spriteId, startCommand, continueCommand, noConversationPattern, onCreated]);
+  }, [canSubmit, adoptFolder, folderName, nickname, spriteId, startCommand, continueCommand, noConversationPattern, busyPattern, errorPattern, onCreated]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -351,6 +357,33 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
                   <span style={styles.hint}>
                     If this pattern appears in the terminal after the continue command,
                     the agent falls back to the plain start command.
+                  </span>
+                </label>
+                <label style={styles.fieldLabel}>
+                  Busy pattern (regex)
+                  <input
+                    style={styles.input}
+                    placeholder='leave blank to use the default'
+                    value={busyPattern}
+                    onChange={(e) => setBusyPattern(e.target.value)}
+                  />
+                  <span style={styles.hint}>
+                    When this pattern appears in the terminal, a thinking bubble
+                    is shown over the agent sprite. Default matches spinners and
+                    common "Thinking…" lines.
+                  </span>
+                </label>
+                <label style={styles.fieldLabel}>
+                  Error pattern (regex)
+                  <input
+                    style={styles.input}
+                    placeholder='leave blank to use the default'
+                    value={errorPattern}
+                    onChange={(e) => setErrorPattern(e.target.value)}
+                  />
+                  <span style={styles.hint}>
+                    When this pattern matches a terminal line, a red "!" badge
+                    appears on the sprite. Hover the agent to see the matched line.
                   </span>
                 </label>
               </div>

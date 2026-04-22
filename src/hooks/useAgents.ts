@@ -37,6 +37,22 @@ export interface Agent {
    */
   hasPreviousConversation?: boolean;
   /**
+   * Optional regex source used to detect that the tool is "busy"
+   * (thinking, editing, running, etc.) so the agent's sprite can show a
+   * thinking-bubble overlay. Empty → a sensible claude-code-aware default
+   * regex is used. Provide your own to support other CLIs or to suppress
+   * false positives from a specific tool's output.
+   */
+  busyPattern?: string;
+  /**
+   * Optional regex source used to detect that the tool has emitted an
+   * error or warning (rate limits, API failures, exceptions, etc.) so the
+   * agent's sprite can show a red "!" badge. Empty → a broad default
+   * regex matches common CLI error signals. Provide your own to silence
+   * noisy tools or to surface tool-specific warnings.
+   */
+  errorPattern?: string;
+  /**
    * When true, the agent wanders the room autonomously on the live tab —
    * random-walking with momentum and occasional idle pauses. Hover, click,
    * WASD, or an open terminal suspends the wander; resumes after a short
@@ -105,6 +121,8 @@ function normalizeAgent(raw: unknown): Agent | null {
     continueCommand: typeof r.continueCommand === 'string' ? r.continueCommand : undefined,
     noConversationPattern: typeof r.noConversationPattern === 'string' ? r.noConversationPattern : undefined,
     hasPreviousConversation: typeof r.hasPreviousConversation === 'boolean' ? r.hasPreviousConversation : false,
+    busyPattern: typeof r.busyPattern === 'string' ? r.busyPattern : undefined,
+    errorPattern: typeof r.errorPattern === 'string' ? r.errorPattern : undefined,
     // Migrated agents default to `false` — users who created agents before
     // wandering existed shouldn't suddenly see them scatter on reload.
     autonomous: typeof r.autonomous === 'boolean' ? r.autonomous : false,
@@ -128,12 +146,16 @@ export interface AddAgentInput {
   startCommand?: string;
   continueCommand?: string;
   noConversationPattern?: string;
+  busyPattern?: string;
+  errorPattern?: string;
 }
 
 export interface AgentCommandsInput {
   startCommand?: string;
   continueCommand?: string;
   noConversationPattern?: string;
+  busyPattern?: string;
+  errorPattern?: string;
 }
 
 export interface UseAgentsApi {
@@ -183,6 +205,8 @@ export function useAgents(): UseAgentsApi {
       startCommand: input.startCommand?.trim() || undefined,
       continueCommand: input.continueCommand?.trim() || undefined,
       noConversationPattern: input.noConversationPattern?.trim() || undefined,
+      busyPattern: input.busyPattern?.trim() || undefined,
+      errorPattern: input.errorPattern?.trim() || undefined,
       hasPreviousConversation: false,
       // Newly created agents wander by default so the office feels alive
       // from the moment the user spawns someone in.
@@ -209,6 +233,8 @@ export function useAgents(): UseAgentsApi {
             startCommand: commands.startCommand?.trim() || undefined,
             continueCommand: commands.continueCommand?.trim() || undefined,
             noConversationPattern: commands.noConversationPattern?.trim() || undefined,
+            busyPattern: commands.busyPattern?.trim() || undefined,
+            errorPattern: commands.errorPattern?.trim() || undefined,
           }
         : a
     )));

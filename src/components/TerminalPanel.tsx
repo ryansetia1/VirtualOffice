@@ -33,6 +33,77 @@ function compilePattern(custom: string | undefined): RegExp {
   }
 }
 
+// Default "agent is busy" regex. Covers:
+//   - Braille spinner frames used by most CLI progress indicators
+//   - Claude Code's own bullets (✻ ✢ ⏺ ●) usually followed by a verb
+//   - Bare verbs with ellipsis (Thinking…, Processing…, Editing…) in case
+//     the spinner is stripped or ANSI-positioned out of our capture window
+// Intentionally generous — false positives are low-cost (bubble briefly
+// shows) while false negatives make the feature invisible.
+const DEFAULT_BUSY_PATTERN =
+  '[\\u2800-\\u28ff]|[✻✢⏺●◐◓◑◒◴◷◶◵]\\s|(Thinking|Processing|Editing|Updating|Analyzing|Running|Reading|Writing|Searching|Cogitating|Generating|Fetching|Planning)(…|\\.{2,})';
+
+function compileBusyPattern(custom: string | undefined): RegExp {
+  const src = (custom && custom.trim()) || DEFAULT_BUSY_PATTERN;
+  try {
+    return new RegExp(src);
+  } catch {
+    return new RegExp(DEFAULT_BUSY_PATTERN);
+  }
+}
+
+// Default "agent emitted an error/warning" regex. Case-insensitive on
+// purpose — CLIs are inconsistent about capitalization. Covers:
+//   - Explicit keywords: Error, Failed, Exception, rejected, timeout
+//   - Common rate-limit / auth / quota wording
+//   - API Error pattern with HTTP status (e.g. "API Error: 429", "HTTP 503")
+// Kept line-oriented in callers (we match against the stripped last line
+// rather than a rolling buffer) so a spurious word in the middle of a
+// prose answer doesn't fire the badge.
+const DEFAULT_ERROR_PATTERN =
+  '\\bAPI Error\\b|\\bHTTP\\s+[45]\\d\\d\\b|\\b[45]\\d\\d\\s*(?:error|rejected|forbidden)\\b|\\b(?:error|failed|exception|rejected|refused|denied|timeout|timed out)\\b|\\b(?:rate|usage|quota|session)\\s+(?:limit|exceeded)\\b|\\bupgrade (?:for|to) higher|\\btoo many requests\\b|\\bunauthorized\\b';
+
+function compileErrorPattern(custom: string | undefined): RegExp {
+  const src = (custom && custom.trim()) || DEFAULT_ERROR_PATTERN;
+  try {
+    return new RegExp(src, 'i');
+  } catch {
+    return new RegExp(DEFAULT_ERROR_PATTERN, 'i');
+  }
+}
+
+// Lines shorter than this are ignored for error matching. Prompts, blank
+// lines, and single-word status chatter shouldn't be able to fire the
+// badge ("error" as a bare word on a tool name line etc.). 8 is enough
+// to filter that out while keeping real error messages like "API Error"
+// intact.
+const ERROR_MIN_LINE_LEN = 8;
+// Cooldown between consecutive error fires, so a tool that prints the
+// same rate-limit message every second doesn't cause a flickering badge.
+// The App-side also auto-expires stale errors separately; this is just
+// to avoid churn on the callback.
+const ERROR_FIRE_COOLDOWN_MS = 5_000;
+
+// Rough ANSI-escape stripper. Targets CSI (`\x1b[…`) and OSC (`\x1b]…\x07`)
+// sequences that dominate xterm output. Not a perfect parser — a malformed
+// OSC could leak — but regex is bounded and idle output rarely contains
+// those corner cases. Good enough for the busy-pattern matcher.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>]/g;
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
+// How long to wait after the last busy signal before declaring "idle".
+// 1500ms tolerates the natural gap between spinner frames even on sluggish
+// terminal streams without making the bubble linger after the tool prints
+// its final result.
+const BUSY_IDLE_TIMEOUT_MS = 1500;
+// Minimum on-screen lifetime for the bubble. Prevents flicker when a tool
+// finishes a tiny sub-step in <200ms and we'd otherwise blink the bubble on
+// and off within a single render frame.
+const BUSY_MIN_VISIBLE_MS = 500;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Parking element
 //
@@ -94,9 +165,25 @@ interface TerminalViewProps {
    * and restart clean if there's nothing to resume.
    */
   onSessionStarted?: () => void;
+  /**
+   * Fires whenever our busy-signal watcher flips state. `true` means the
+   * underlying CLI is actively thinking/editing/running; `false` means it
+   * has been quiet for at least BUSY_IDLE_TIMEOUT_MS (and the minimum-
+   * visible window has elapsed). The parent uses this to paint a thinking
+   * bubble over the agent sprite.
+   */
+  onBusyChange?: (busy: boolean) => void;
+  /**
+   * Fires when the error-pattern watcher matches a line of PTY output.
+   * Payload is the trimmed matching line (truncated to a sane length for
+   * tooltip display). The parent owns lifecycle of the error badge —
+   * this callback only reports new matches, subject to a short cooldown
+   * so the same line firing repeatedly doesn't spam the UI.
+   */
+  onErrorDetected?: (message: string) => void;
 }
 
-export function TerminalView({ agent, target, active, onAutoClose, onSessionEnded, onPatternFallback, onSessionStarted }: TerminalViewProps) {
+export function TerminalView({ agent, target, active, onAutoClose, onSessionEnded, onPatternFallback, onSessionStarted, onBusyChange, onErrorDetected }: TerminalViewProps) {
   const sessionId = `agent:${agent.id}`;
 
   // The div we imperatively append to the current chrome slot. State so the
@@ -131,6 +218,35 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
   const startCmdRef = useRef<string | null>(null);
   const decoderRef = useRef<TextDecoder>(new TextDecoder('utf-8', { fatal: false }));
 
+  // ── Busy-signal watcher ───────────────────────────────────────────────────
+  //
+  // We feed stripped PTY output through a regex and track:
+  //   busyLastMatchAt: timestamp of the most recent busy-pattern match
+  //   busyShownAt:     timestamp we most recently flipped to busy=true
+  //   busy:            current reported state (mirrored to parent)
+  // A short buffer is kept across chunks so patterns don't split across
+  // PTY reads. Idle timeout is polled on a 250ms interval rather than a
+  // setTimeout chain so we never dangle timers across chunks.
+  const busyPatternRef = useRef<RegExp | null>(null);
+  const busyTailRef = useRef<string>('');
+  const busyLastMatchAtRef = useRef<number>(0);
+  const busyShownAtRef = useRef<number>(0);
+  const busyRef = useRef<boolean>(false);
+  const onBusyChangeRef = useRef<typeof onBusyChange>(onBusyChange);
+  useEffect(() => { onBusyChangeRef.current = onBusyChange; }, [onBusyChange]);
+
+  // ── Error-signal watcher ──────────────────────────────────────────────────
+  //
+  // Runs line-oriented: we keep a small tail across chunks, split on
+  // newlines, and test each *complete* line. The trailing partial line
+  // is preserved for the next chunk. This avoids matching a phrase that
+  // happens to straddle a chunk boundary twice.
+  const errorPatternRef = useRef<RegExp | null>(null);
+  const errorTailRef = useRef<string>('');
+  const errorLastFiredAtRef = useRef<number>(0);
+  const onErrorDetectedRef = useRef<typeof onErrorDetected>(onErrorDetected);
+  useEffect(() => { onErrorDetectedRef.current = onErrorDetected; }, [onErrorDetected]);
+
   // ── One-time setup: create host div, open xterm, spawn PTY ──────────────────
   useEffect(() => {
     const div = document.createElement('div');
@@ -147,7 +263,23 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
       term: Terminal | null;
       closeChannel: (() => void) | null;
       ro: ResizeObserver | null;
-    } = { disposed: false, term: null, closeChannel: null, ro: null };
+      busyTimer: number | null;
+    } = { disposed: false, term: null, closeChannel: null, ro: null, busyTimer: null };
+
+    // Idle-check tick. Runs at 250ms regardless of PTY activity so we can
+    // declare "idle" without needing another chunk to wake us up. Cheap —
+    // a few comparisons and a single callback at most. Also honours the
+    // minimum-visible window so a 50ms blip doesn't flicker the bubble.
+    state.busyTimer = window.setInterval(() => {
+      if (!busyRef.current) return;
+      const now = performance.now();
+      const sinceMatch = now - busyLastMatchAtRef.current;
+      const sinceShown = now - busyShownAtRef.current;
+      if (sinceMatch >= BUSY_IDLE_TIMEOUT_MS && sinceShown >= BUSY_MIN_VISIBLE_MS) {
+        busyRef.current = false;
+        onBusyChangeRef.current?.(false);
+      }
+    }, 250);
 
     (async () => {
       let term: Terminal;
@@ -259,6 +391,13 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
             .catch((e) => console.warn('[terminal] fallback failed', e));
         };
 
+        // Compile the busy-signal regex once up-front. Separate from the
+        // "no previous conversation" pattern because it runs for the full
+        // lifetime of the session, not just during the continue phase.
+        busyPatternRef.current = compileBusyPattern(agent.busyPattern);
+        // Same story for the error watcher — one compile per session.
+        errorPatternRef.current = compileErrorPattern(agent.errorPattern);
+
         const closeChannel = await ptySpawn(sessionId, cwd, safeCols, safeRows, {
           onReady: () => {
             if (state.disposed) return;
@@ -293,23 +432,87 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
           onData: (bytes) => {
             if (state.disposed) return;
             term.write(bytes);
-            // While watching for the "no previous conversation" signal, keep
-            // a small rolling buffer of decoded output and test it on every
-            // chunk. 4 KB is plenty to catch any reasonable error line; if a
-            // tool splits the phrase across more than 4 KB of output, we'd
-            // rather miss a fallback than flip phases mid-conversation.
+            // Decode once per chunk — shared by both the "no previous
+            // conversation" watcher (phase-gated) and the busy-signal
+            // watcher (always on). The TextDecoder is stateful when
+            // `stream: true`; decoding twice would corrupt UTF-8 splits.
+            const decoded = decoderRef.current.decode(bytes, { stream: true });
+            if (!decoded) return;
+
+            // "no previous conversation" watcher. 4 KB is plenty to catch
+            // any reasonable error line; if a tool splits the phrase across
+            // more than 4 KB of output we'd rather miss a fallback than
+            // flip phases mid-conversation.
             if (phaseRef.current === 'running-continue' && patternRef.current) {
-              const decoded = decoderRef.current.decode(bytes, { stream: true });
-              if (decoded) {
-                bufferRef.current = (bufferRef.current + decoded).slice(-4096);
-                if (patternRef.current.test(bufferRef.current)) {
-                  triggerFallback();
+              bufferRef.current = (bufferRef.current + decoded).slice(-4096);
+              if (patternRef.current.test(bufferRef.current)) {
+                triggerFallback();
+              }
+            }
+
+            // Busy-signal watcher. Strip ANSI *after* concatenating with
+            // the tail so escape sequences split across chunks still get
+            // stripped correctly. Keep tail small (1 KB): busy markers
+            // arrive fast and don't span much text, and a larger tail
+            // would keep stale spinner chars "alive" after the tool is
+            // actually done.
+            if (busyPatternRef.current) {
+              const combined = busyTailRef.current + decoded;
+              const stripped = stripAnsi(combined);
+              if (busyPatternRef.current.test(stripped)) {
+                const now = performance.now();
+                busyLastMatchAtRef.current = now;
+                if (!busyRef.current) {
+                  busyRef.current = true;
+                  busyShownAtRef.current = now;
+                  onBusyChangeRef.current?.(true);
                 }
+              }
+              // Keep only the tail of the *decoded* (not stripped) stream;
+              // ANSI stripping is cheap and re-runs on every chunk.
+              busyTailRef.current = combined.slice(-1024);
+            }
+
+            // Error-signal watcher. Line-oriented so we can ship the
+            // matched line to the parent as a tooltip payload. We also
+            // replace lone `\r` with `\n` before splitting because some
+            // tools redraw progress lines with carriage returns only,
+            // which would otherwise cause the error line to be stuck in
+            // the tail indefinitely.
+            if (errorPatternRef.current) {
+              const combined = errorTailRef.current + decoded;
+              const normalized = combined.replace(/\r(?!\n)/g, '\n');
+              const lines = normalized.split('\n');
+              // The last element is the in-progress line (no terminator
+              // yet) — keep it as the new tail. Process everything before.
+              errorTailRef.current = lines.pop() ?? '';
+              // Cap the tail so an extremely long single line (no
+              // terminator at all, e.g. a very long prompt) can't grow
+              // unbounded. 4 KB is way past the length of any sane error.
+              if (errorTailRef.current.length > 4096) {
+                errorTailRef.current = errorTailRef.current.slice(-4096);
+              }
+              for (const rawLine of lines) {
+                const line = stripAnsi(rawLine).trim();
+                if (line.length < ERROR_MIN_LINE_LEN) continue;
+                if (!errorPatternRef.current.test(line)) continue;
+                const now = performance.now();
+                if (now - errorLastFiredAtRef.current < ERROR_FIRE_COOLDOWN_MS) continue;
+                errorLastFiredAtRef.current = now;
+                // Cap length for tooltip display (~120 chars is plenty).
+                const message = line.length > 120 ? line.slice(0, 117) + '…' : line;
+                onErrorDetectedRef.current?.(message);
               }
             }
           },
           onExit: () => {
             if (state.disposed) return;
+            // Session ended → no more output will arrive, so clear the
+            // thinking bubble immediately regardless of the idle window.
+            if (busyRef.current) {
+              busyRef.current = false;
+              onBusyChangeRef.current?.(false);
+            }
             // Surface the exit to the parent so the conversation flag can be
             // promoted to "has previous". Parent suppresses this when the
             // exit was initiated by an explicit user-reset click.
@@ -347,11 +550,18 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
     return () => {
       state.disposed = true;
       if (state.ro) state.ro.disconnect();
+      if (state.busyTimer != null) window.clearInterval(state.busyTimer);
       if (state.closeChannel) state.closeChannel();
       ptyKill(sessionId).catch(() => { /* ignore */ });
       if (state.term) state.term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      // Make sure the parent's bubble clears if the session is torn down
+      // while still reporting busy (user closes terminal mid-think).
+      if (busyRef.current) {
+        busyRef.current = false;
+        onBusyChangeRef.current?.(false);
+      }
       div.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
