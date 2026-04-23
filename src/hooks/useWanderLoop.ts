@@ -93,6 +93,7 @@ export function useWanderLoop(deps: UseWanderLoopDeps): UseWanderLoopApi {
   const pauseAgent = useCallback((agentId: string) => {
     const states = statesRef.current;
     const s = states.get(agentId);
+    const wasActive = !!s && !s.paused;
     if (s) {
       s.paused = true;
       s.resumeAt = Number.POSITIVE_INFINITY;
@@ -106,6 +107,16 @@ export function useWanderLoop(deps: UseWanderLoopDeps): UseWanderLoopApi {
         resumeAt: Number.POSITIVE_INFINITY,
         animClock: 0,
       });
+    }
+    // Snap to idle frame **once**, at the pause transition. Doing this
+    // every RAF (as we used to) races with any external driver that sets
+    // animFrame on the same agent — most visibly the WASD loop, which
+    // cycles 0→1→2→1 at 6 Hz. Per-frame reset-to-1 collapsed that cycle
+    // into a 60 Hz flicker between the WASD value and 1, making the
+    // sprite look jittery / absurdly fast. One-shot reset gives us the
+    // "clean mid-stride freeze" for hover pauses without racing anyone.
+    if (wasActive) {
+      agentsApiRef.current.setAnimFrame(agentId, 1);
     }
   }, []);
 
@@ -136,6 +147,10 @@ export function useWanderLoop(deps: UseWanderLoopDeps): UseWanderLoopApi {
     }
     s.paused = true;
     s.resumeAt = performance.now() + graceMs;
+    // Intentionally does NOT touch animFrame — the takeover path exists
+    // because an external driver (WASD loop) is about to start writing
+    // to it, and racing that driver is exactly the jitter bug we're
+    // trying to avoid. Whoever kicked us owns the animation.
   }, []);
 
   const api = useMemo<UseWanderLoopApi>(
@@ -238,9 +253,11 @@ function processAgent(
   }
 
   if (s.paused) {
-    // While paused we still render a valid animation state (frame 1 =
-    // mid-stride idle) so the sprite doesn't look frozen mid-step.
-    if (agent.animFrame !== 1) api.setAnimFrame(agent.id, 1);
+    // Deliberately do NOT touch `animFrame` here. See `pauseAgent` /
+    // `kickTakeoverTimer` — the idle frame is snapped once at the pause
+    // transition (for hover pauses) and the takeover caller is expected
+    // to own animFrame for its duration (for WASD). Resetting per frame
+    // races that external writer and produces a 60 Hz flicker.
     return;
   }
 
