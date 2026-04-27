@@ -149,11 +149,46 @@ Anchor semantics (relative to the bbox bottom = `spanH`):
 ### When to reach for it
 
 - A chair / desk combo keeps covering the agent one row south of the
-  seat → bump the asset anchor to `spanH + 1` so the agent pops in front
-  as soon as its foot crosses the seat row.
-- Tall back wall whose pixels extend below its bbox → same as above.
+  seat — or *doesn't* cover the agent when sitting. Anchor lets you fix
+  both without changing the bbox.
+- Tall back wall whose pixels extend below its bbox.
 - Floor art parked on the object layer → anchor to `1` (top row) so it
   behaves like a floor decal.
+
+### Picking a value (tribal knowledge)
+
+The "right" anchor depends on where the asset's visual foot sits
+*inside* its bbox — which we can't infer automatically, hence the
+manual editor. For any asset where an agent can occupy a row inside
+the bbox (chair seat, vehicle entry, etc.), the rule of thumb:
+
+```
+anchor > (seatRowOffset + 1)   → asset covers agent on the seat row
+anchor < (agentFootRowOffset + 1) → agent covers asset when past the foot
+```
+
+Where the offsets are measured from the bbox top (`row` field in a
+placement). At equal sortY the tiebreak favours the agent, so
+`anchor === seatRowOffset + 1` is **not enough** — aim just above.
+
+**Seamless transitions.** Naively picking a half-step (`seat + 1.5`)
+works, but the layer flip when the agent walks off the seat is
+abrupt. Picking a *tiny* delta above the threshold makes the flip
+feel smooth because the chair's sort line almost coincides with the
+seat row — the agent pops in front the instant its foot crosses the
+next row, with no noticeable travel.
+
+Concrete example (chair, `spanH = 3`, seat at bbox row 1):
+- `2.0` → agent wins on seat row (chair doesn't cover). ✗
+- `2.1` → chair wins on seat row by a hair; agent wins immediately on
+  next row south. Feels seamless during walk-off. ✓ (user-validated)
+- `2.5` → works identically on integer rows; transition is slightly
+  more abrupt during sub-row animation.
+- `3.0` → default (`= spanH`). Ties with a sitting agent, agent wins.
+  Same as the bug this feature is meant to fix.
+
+So the practical recipe for chair-style assets:
+`anchor = seatRowOffsetFromBboxTop + 1 + 0.1`.
 
 ### Relationship to the 3-bucket render-order override
 
