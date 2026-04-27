@@ -19,6 +19,8 @@ interface Props {
     noConversationPattern?: string;
     busyPattern?: string;
     errorPattern?: string;
+    notifyOnDone?: boolean;
+    notifyOnError?: boolean;
   }) => void;
   /** Folder name pre-fill when adopting an orphan. If set, folder input is disabled. */
   adoptFolder?: string | null;
@@ -87,6 +89,14 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
   const [noConversationPattern, setNoConversationPattern] = useState('');
   const [busyPattern, setBusyPattern] = useState('');
   const [errorPattern, setErrorPattern] = useState('');
+  // Done-notification preference. Defaults to on for new agents so the
+  // feature is discoverable; users creating a chatty agent (watch-mode
+  // linter, etc.) can untick this up front to avoid notification spam.
+  const [notifyOnDone, setNotifyOnDone] = useState(true);
+  // Error-notification preference. Separate from `notifyOnDone` so a
+  // user can keep error alerts on even when they silence done pings for
+  // a chatty agent.
+  const [notifyOnError, setNotifyOnError] = useState(true);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -178,12 +188,14 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
         noConversationPattern: noConversationPattern.trim() || undefined,
         busyPattern: busyPattern.trim() || undefined,
         errorPattern: errorPattern.trim() || undefined,
+        notifyOnDone,
+        notifyOnError,
       });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
-  }, [canSubmit, adoptFolder, folderName, nickname, spriteId, startCommand, continueCommand, noConversationPattern, busyPattern, errorPattern, onCreated]);
+  }, [canSubmit, adoptFolder, folderName, nickname, spriteId, startCommand, continueCommand, noConversationPattern, busyPattern, errorPattern, notifyOnDone, notifyOnError, onCreated]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -309,6 +321,39 @@ export default function AddAgentModal({ onClose, onCreated, adoptFolder, usedSpr
               })}
             </div>
           </div>
+
+          <label style={styles.checkboxRow}>
+            <input
+              type="checkbox"
+              checked={notifyOnDone}
+              onChange={(e) => setNotifyOnDone(e.target.checked)}
+            />
+            <span style={styles.checkboxText}>
+              Notify me when this agent finishes
+              <span style={styles.hint}>
+                Shows a green badge on the sprite and a system notification
+                when the agent transitions from busy to idle — but only
+                while you aren't actively watching its terminal.
+              </span>
+            </span>
+          </label>
+
+          <label style={styles.checkboxRow}>
+            <input
+              type="checkbox"
+              checked={notifyOnError}
+              onChange={(e) => setNotifyOnError(e.target.checked)}
+            />
+            <span style={styles.checkboxText}>
+              Notify me when this agent hits an error
+              <span style={styles.hint}>
+                System notification (with the matched line) when the error
+                pattern fires, at most once per minute per agent. The red
+                "!" badge on the sprite still shows regardless of this
+                setting.
+              </span>
+            </span>
+          </label>
 
           {/* Advanced: auto-run commands. Collapsed by default so the modal
               stays simple for users who don't need it. */}
@@ -539,4 +584,14 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--accent)', borderRadius: 4, fontSize: 13, fontWeight: 600, cursor: 'pointer',
   },
   submitBtnDisabled: { opacity: 0.5, cursor: 'not-allowed' },
+  checkboxRow: {
+    display: 'flex', alignItems: 'flex-start', gap: 8,
+    padding: '8px 10px', background: 'var(--bg-surface)',
+    border: '1px solid var(--border)', borderRadius: 4,
+    cursor: 'pointer',
+  },
+  checkboxText: {
+    display: 'flex', flexDirection: 'column' as const, gap: 4,
+    fontSize: 12, fontWeight: 500, color: 'var(--text-primary)',
+  },
 };

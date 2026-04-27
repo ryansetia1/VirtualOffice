@@ -70,7 +70,7 @@ export default function Toolbar({
   const [paintDropdown, setPaintDropdown] = useState(false);
   const [dropdownPos, setDropdownPos] = useState({ left: 0, top: 0 });
   const paintBtnRef = useRef<HTMLDivElement>(null);
-  const paintDropdownTimer = useRef<ReturnType<typeof setTimeout>>();
+  const paintDropdownTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const openPaintDropdown = () => {
     clearTimeout(paintDropdownTimer.current);

@@ -23,6 +23,8 @@ import { exportProject, importProject } from './utils/projectFile';
 import { deleteAgentFolder } from './utils/agentFolders';
 import { ptyKill } from './utils/pty';
 import { isTauri } from './utils/tauri';
+import { notifyAgentDone, notifyAgentError } from './utils/notifications';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import GridCanvas from './components/GridCanvas';
 import AssetPalette from './components/AssetPalette';
 import Toolbar from './components/Toolbar';
@@ -95,6 +97,8 @@ export default function App() {
     noConversationPattern: string;
     busyPattern: string;
     errorPattern: string;
+    notifyOnDone: boolean;
+    notifyOnError: boolean;
   } | null>(null);
   // Agent hovered in the live grid. Used both for the visual glow and for
   // suspending the wander loop while the pointer is over the sprite so the
@@ -113,7 +117,60 @@ export default function App() {
   //   - the agent becomes "busy" again (tool recovered / moved on)
   //   - 10 minutes pass without a fresh error (stale — cleared by sweeper)
   const [errorAgents, setErrorAgents] = useState<Record<string, { message: string; at: number }>>({});
-  const handleBusyChange = useCallback((agentId: string, busy: boolean) => {
+  // Per-agent "done" marker. Populated when a busy→idle transition is
+  // observed *while* the user is not actively watching this agent's
+  // terminal (app backgrounded, window blurred, different agent focused,
+  // etc.). Drives the green checkmark badge in GridCanvas plus the dock
+  // badge count. Cleared when:
+  //   - the user opens that agent's terminal (acknowledged)
+  //   - the agent becomes busy again (fresh work in progress)
+  //   - 10 minutes pass without a fresh event (stale — cleared by sweeper)
+  const [doneAgents, setDoneAgents] = useState<Record<string, { at: number }>>({});
+  // Tracks whether the OS-level app window currently has focus. Filled by a
+  // Tauri `onFocusChanged` listener (see effect below) and assumed `true`
+  // outside Tauri so browser builds don't suppress the done/notify logic.
+  const [isWindowFocused, setIsWindowFocused] = useState<boolean>(true);
+
+  // Minimum time an agent must have been busy before we consider a
+  // subsequent idle transition worth notifying about. Filters out tiny
+  // sub-step flips (e.g., a single spinner tick) so the badge/notification
+  // only fires on meaningful work.
+  const MIN_NOTIFY_DURATION_MS = 5_000;
+  // After this long without acknowledgement, a done marker is considered
+  // stale and cleared by the sweeper. Matches the error sweeper cadence.
+  const STALE_MS = 10 * 60 * 1000;
+
+  // Track IDs of terminals that are open + visible + floating-focused-or-
+  // active-dock so the watching guard can answer synchronously inside the
+  // busy-change callback. We recompute these into refs via effects below.
+  const openTerminalIdsRef = useRef<string[]>([]);
+  const floatingTerminalIdsRef = useRef<Set<string>>(new Set());
+  const hiddenTerminalIdsRef = useRef<Set<string>>(new Set());
+  const activeDockedTerminalIdRef = useRef<string | null>(null);
+  const focusedTerminalIdRef = useRef<string | null>(null);
+  const isWindowFocusedRef = useRef<boolean>(true);
+
+  // Returns true when the user is currently "watching" this agent's
+  // terminal: app foreground + window focused + terminal open, not hidden,
+  // and either the focused floating window or the active docked tab.
+  const isUserWatching = useCallback((agentId: string): boolean => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return false;
+    if (!isWindowFocusedRef.current) return false;
+    if (!openTerminalIdsRef.current.includes(agentId)) return false;
+    if (hiddenTerminalIdsRef.current.has(agentId)) return false;
+    if (floatingTerminalIdsRef.current.has(agentId)) {
+      return focusedTerminalIdRef.current === agentId;
+    }
+    return activeDockedTerminalIdRef.current === agentId;
+  }, []);
+
+  // Ref-mirror of `agentsApi`, populated further down in render so the
+  // busy-change callback (defined here so it can capture stable deps) can
+  // look up the current agent record without re-creating on every agent
+  // list change.
+  const agentsApiLiveRef = useRef<ReturnType<typeof useAgents> | null>(null);
+
+  const handleBusyChange = useCallback((agentId: string, busy: boolean, durationMs: number) => {
     setBusyAgentIds((prev) => {
       const has = !!prev[agentId];
       if (busy === has) return prev;
@@ -123,8 +180,8 @@ export default function App() {
       return rest;
     });
     // Busy = the tool is producing again, so any prior error alert is
-    // considered resolved. We don't wait for the user to open the terminal
-    // in this case since the visual cue no longer reflects reality.
+    // considered resolved. Any prior done marker is likewise stale — new
+    // work has started so the "finished" signal no longer reflects reality.
     if (busy) {
       setErrorAgents((prev) => {
         if (!prev[agentId]) return prev;
@@ -132,20 +189,70 @@ export default function App() {
         void _omit;
         return rest;
       });
+      setDoneAgents((prev) => {
+        if (!prev[agentId]) return prev;
+        const { [agentId]: _omit, ...rest } = prev;
+        void _omit;
+        return rest;
+      });
+      return;
     }
-  }, []);
+    // Falling edge: only surface a done indicator when (a) the busy window
+    // was long enough to matter, (b) the user isn't already watching this
+    // terminal, and (c) the agent hasn't opted out of done notifications.
+    if (durationMs < MIN_NOTIFY_DURATION_MS) return;
+    if (isUserWatching(agentId)) return;
+    const api = agentsApiLiveRef.current;
+    const agent = api?.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+    if (agent.notifyOnDone === false) return;
+    setDoneAgents((prev) => ({ ...prev, [agentId]: { at: Date.now() } }));
+    void notifyAgentDone(agent);
+  }, [isUserWatching]);
+  // Per-agent last-notified timestamp for error banners. A busy tool
+  // that spams the error pattern (e.g. a rate-limit retry loop that
+  // prints on every poll) should not paint the user's notification
+  // center. We throttle to at most one OS banner per agent per cooldown
+  // window; the in-app "!" badge keeps updating at full rate so the
+  // most recent message is always visible on hover.
+  const errorNotifiedAtRef = useRef<Record<string, number>>({});
+  const ERROR_NOTIFY_COOLDOWN_MS = 60_000;
+
   const handleErrorDetected = useCallback((agentId: string, message: string) => {
     setErrorAgents((prev) => ({ ...prev, [agentId]: { message, at: Date.now() } }));
-  }, []);
-  // Stale-error sweeper. Runs at 30s intervals; cheap compared to anything
+    // OS notification: guarded same as done — respect watching state,
+    // per-agent opt-out flag, and the throttle above. Watching guard
+    // means a user who is already staring at the terminal doesn't get
+    // a redundant banner for a line they'll see inline anyway.
+    if (isUserWatching(agentId)) return;
+    const api = agentsApiLiveRef.current;
+    const agent = api?.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+    if (agent.notifyOnError === false) return;
+    const last = errorNotifiedAtRef.current[agentId] ?? 0;
+    const now = Date.now();
+    if (now - last < ERROR_NOTIFY_COOLDOWN_MS) return;
+    errorNotifiedAtRef.current[agentId] = now;
+    void notifyAgentError(agent, message);
+  }, [isUserWatching]);
+  // Stale-badge sweeper. Runs at 30s intervals; cheap compared to anything
   // else on the main loop. 10 minutes is long enough that a user stepping
   // away briefly still sees the badge when they come back, but short
-  // enough that a never-acknowledged error from yesterday doesn't linger.
+  // enough that a never-acknowledged marker from yesterday doesn't linger.
+  // Single interval covers both error and done buckets.
   useEffect(() => {
-    const STALE_MS = 10 * 60 * 1000;
     const id = window.setInterval(() => {
+      const now = Date.now();
       setErrorAgents((prev) => {
-        const now = Date.now();
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (now - v.at >= STALE_MS) { changed = true; continue; }
+          next[k] = v;
+        }
+        return changed ? next : prev;
+      });
+      setDoneAgents((prev) => {
         let changed = false;
         const next: typeof prev = {};
         for (const [k, v] of Object.entries(prev)) {
@@ -157,6 +264,46 @@ export default function App() {
     }, 30_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Wire Tauri window focus state into our ref-mirrored flag. Mounted once;
+  // in browser builds the `isTauri()` gate short-circuits so the default
+  // `true` is preserved and watching logic keeps working.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      try {
+        const win = getCurrentWindow();
+        unlisten = await win.onFocusChanged(({ payload: focused }) => {
+          if (disposed) return;
+          setIsWindowFocused(focused);
+        });
+        const initial = await win.isFocused();
+        if (!disposed) setIsWindowFocused(initial);
+      } catch { /* non-fatal; default true */ }
+    })();
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => { isWindowFocusedRef.current = isWindowFocused; }, [isWindowFocused]);
+
+  // Dock-badge sync. On macOS this shows a little count bubble on the app
+  // icon in the Dock. We combine pending done + error markers so the user
+  // can tell at a glance how many agents need attention without having the
+  // app window in the foreground. `null` clears the badge entirely.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const count = Object.keys(doneAgents).length + Object.keys(errorAgents).length;
+    (async () => {
+      try {
+        await getCurrentWindow().setBadgeCount(count > 0 ? count : undefined);
+      } catch { /* non-fatal */ }
+    })();
+  }, [doneAgents, errorAgents]);
   const [openTerminalIds, setOpenTerminalIds] = useState<string[]>([]);
   // IDs in this set are shown as independent floating windows; the rest go into the docked panel.
   const [floatingTerminalIds, setFloatingTerminalIds] = useState<Set<string>>(new Set());
@@ -165,6 +312,15 @@ export default function App() {
   const [activeDockedTerminalId, setActiveDockedTerminalId] = useState<string | null>(null);
   // Track which floating window was last clicked so it renders on top.
   const [focusedTerminalId, setFocusedTerminalId] = useState<string | null>(null);
+  // Mirror of the above four state values into refs so `isUserWatching`
+  // can answer synchronously inside the busy-change callback (the callback
+  // runs in response to PTY output, not React render, so we can't just
+  // close over state).
+  useEffect(() => { openTerminalIdsRef.current = openTerminalIds; }, [openTerminalIds]);
+  useEffect(() => { floatingTerminalIdsRef.current = floatingTerminalIds; }, [floatingTerminalIds]);
+  useEffect(() => { hiddenTerminalIdsRef.current = hiddenTerminalIds; }, [hiddenTerminalIds]);
+  useEffect(() => { activeDockedTerminalIdRef.current = activeDockedTerminalId; }, [activeDockedTerminalId]);
+  useEffect(() => { focusedTerminalIdRef.current = focusedTerminalId; }, [focusedTerminalId]);
   // Slots are chrome-owned DOM nodes that host xterm. Kept in state so
   // `<TerminalView>` re-renders with the right `target` when chrome mounts.
   const [dockedSlot, setDockedSlot] = useState<HTMLDivElement | null>(null);
@@ -202,10 +358,16 @@ export default function App() {
     });
     setHiddenTerminalIds((prev) => { const n = new Set(prev); n.delete(agentId); return n; });
     setFocusedTerminalId(agentId);
-    // Opening the terminal counts as acknowledging any pending error
-    // badge — the user is about to see (or just saw) the actual message
-    // in the terminal, so the alert has served its purpose.
+    // Opening the terminal counts as acknowledging any pending error or
+    // done badge — the user is about to see (or just saw) whatever the
+    // alert was about, so the cue has served its purpose.
     setErrorAgents((prev) => {
+      if (!prev[agentId]) return prev;
+      const { [agentId]: _omit, ...rest } = prev;
+      void _omit;
+      return rest;
+    });
+    setDoneAgents((prev) => {
       if (!prev[agentId]) return prev;
       const { [agentId]: _omit, ...rest } = prev;
       void _omit;
@@ -252,15 +414,16 @@ export default function App() {
   const {
     room, version, canUndo, canRedo, undo, redo, beginUndoBatch, endUndoBatch,
     addPlacement, removePlacementAt, removePlacementById, removePlacementsByIds, getPlacementAt,
-    clearAll, resize, loadState,
+    clearAll, resize,
     toggleLayerVisibility, toggleLayerLock, renameLayer,
-    bringToFront, sendToBack, movePlacementToLayer, movePlacementsToLayer, reorderPlacement, reorderPlacementsBulk,
+    bringToFront, sendToBack, movePlacementsToLayer, reorderPlacement, reorderPlacementsBulk,
     createGroup, duplicateGroup, ungroupPlacements, deleteGroup, renameGroup,
     toggleGroupVisibility, toggleGroupLock, toggleGroupCollapsed, reorderGroups, moveGroupToLayer, addPlacementsToGroup, removePlacementsFromGroup,
     bulkMovePlacements, bulkDuplicatePlacements,
   } = useGrid(initialRoom);
   const { toolState, setMode, setDrawSubTool, setTool, setActiveLayer, selectAsset, rotateAsset, flipHAsset, flipVAsset, resetTransform } = useTool();
   const agentsApi = useAgents();
+  agentsApiLiveRef.current = agentsApi;
   const collisionApi = useCollisionMasks();
   const renderOrderApi = useRenderOrderOverrides();
   const { customAssets, customAssetInfos, addCustomAssets, removeCustomAsset } = useCustomAssets();
@@ -331,26 +494,22 @@ export default function App() {
     agentsApi.setHasPreviousConversation(agentId, true);
   }, [agentsApi]);
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     saveRoom(room);
-    exportProject();
+    try {
+      await exportProject();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Export failed.');
+    }
   }, [room]);
 
-  const handleImport = useCallback(() => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      try {
-        await importProject(file);
-        window.location.reload();
-      } catch (err) {
-        window.alert(err instanceof Error ? err.message : 'Import failed.');
-      }
-    };
-    input.click();
+  const handleImport = useCallback(async () => {
+    try {
+      const path = await importProject();
+      if (path) window.location.reload();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Import failed.');
+    }
   }, []);
 
   const handleClear = useCallback(() => {
@@ -659,6 +818,7 @@ export default function App() {
               hoveredAgentId={hoveredAgentId}
               busyAgentIds={busyAgentIds}
               errorAgents={errorAgents}
+              doneAgents={doneAgents}
               onActivateAgent={agentsApi.setActive}
               onDeactivateAgent={() => agentsApi.setActive(null)}
               onOpenAgentTerminal={openAgentTerminal}
@@ -934,7 +1094,7 @@ export default function App() {
                 onSessionEnded={() => handleSessionEnded(t.id)}
                 onPatternFallback={() => handlePatternFallback(t.id)}
                 onSessionStarted={() => handleSessionStarted(t.id)}
-                onBusyChange={(busy) => handleBusyChange(t.id, busy)}
+                onBusyChange={(busy, durationMs) => handleBusyChange(t.id, busy, durationMs)}
                 onErrorDetected={(message) => handleErrorDetected(t.id, message)}
               />
             ))}
@@ -948,7 +1108,7 @@ export default function App() {
           usedSpriteIds={agentsApi.agents.map((a) => a.spriteId)}
           existingAgents={agentsApi.agents.map((a) => ({ nickname: a.nickname, folderName: a.folderName }))}
           onClose={() => setAddAgentModal(null)}
-          onCreated={({ nickname, folderName, spriteId, startCommand, continueCommand, noConversationPattern, busyPattern, errorPattern }) => {
+          onCreated={({ nickname, folderName, spriteId, startCommand, continueCommand, noConversationPattern, busyPattern, errorPattern, notifyOnDone }) => {
             const cx = Math.floor(room.width / 2);
             const cy = Math.floor(room.height / 2);
             const spot = findNearestWalkable(cy, cx, room, collisionApi) ?? { row: cy, col: cx };
@@ -963,6 +1123,7 @@ export default function App() {
               noConversationPattern,
               busyPattern,
               errorPattern,
+              notifyOnDone,
             });
             setAddAgentModal(null);
             setOrphanRefreshKey((k) => k + 1);
@@ -1154,6 +1315,8 @@ export default function App() {
               noConversationPattern: agent.noConversationPattern ?? '',
               busyPattern: agent.busyPattern ?? '',
               errorPattern: agent.errorPattern ?? '',
+              notifyOnDone: agent.notifyOnDone ?? true,
+              notifyOnError: agent.notifyOnError ?? true,
             }),
           },
           {
@@ -1250,6 +1413,8 @@ export default function App() {
             noConversationPattern: commandsDialog.noConversationPattern,
             busyPattern: commandsDialog.busyPattern,
             errorPattern: commandsDialog.errorPattern,
+            notifyOnDone: commandsDialog.notifyOnDone,
+            notifyOnError: commandsDialog.notifyOnError,
           });
           setCommandsDialog(null);
         };
@@ -1324,6 +1489,36 @@ export default function App() {
                 <span style={dialogStyles.hint}>
                   When this pattern matches a terminal line, a red "!" badge appears on
                   the sprite. Cleared when you open the terminal or the agent becomes busy again.
+                </span>
+              </label>
+              <label style={dialogStyles.checkboxRow}>
+                <input
+                  type="checkbox"
+                  checked={commandsDialog.notifyOnDone}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, notifyOnDone: e.target.checked })}
+                />
+                <span style={dialogStyles.checkboxText}>
+                  Notify me when this agent finishes
+                  <span style={dialogStyles.hint}>
+                    Green badge on the sprite + system notification when the
+                    agent goes from busy to idle — but only while you aren't
+                    actively watching its terminal.
+                  </span>
+                </span>
+              </label>
+              <label style={dialogStyles.checkboxRow}>
+                <input
+                  type="checkbox"
+                  checked={commandsDialog.notifyOnError}
+                  onChange={(e) => setCommandsDialog({ ...commandsDialog, notifyOnError: e.target.checked })}
+                />
+                <span style={dialogStyles.checkboxText}>
+                  Notify me when this agent hits an error
+                  <span style={dialogStyles.hint}>
+                    System notification (with the matched line) when the error
+                    pattern fires, at most once per minute per agent. The red
+                    "!" badge still shows regardless of this setting.
+                  </span>
                 </span>
               </label>
               <div style={dialogStyles.conversationRow}>
@@ -1485,6 +1680,16 @@ const dialogStyles: Record<string, React.CSSProperties> = {
   btnDanger: {
     padding: '8px 14px', background: '#ef5350', color: '#fff',
     border: '1px solid #ef5350', borderRadius: 4, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+  },
+  checkboxRow: {
+    display: 'flex', alignItems: 'flex-start', gap: 8,
+    padding: '8px 10px', background: 'var(--bg-surface)',
+    border: '1px solid var(--border)', borderRadius: 4,
+    marginBottom: 12, cursor: 'pointer',
+  },
+  checkboxText: {
+    display: 'flex', flexDirection: 'column' as const, gap: 4,
+    fontSize: 12, fontWeight: 500, color: 'var(--text-primary)',
   },
 };
 

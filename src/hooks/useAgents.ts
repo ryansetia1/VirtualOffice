@@ -60,6 +60,26 @@ export interface Agent {
    * default to `false` to avoid surprising the user.
    */
   autonomous?: boolean;
+  /**
+   * When true (the default), a busy→idle transition for this agent while
+   * the user isn't actively watching the terminal will paint a green "✓"
+   * badge on the sprite and fire a system notification. Setting this to
+   * `false` silences both for this specific agent — useful for agents
+   * that ping-pong between busy/idle many times per minute (e.g., a
+   * watch-mode linter) where the notification would be noise rather than
+   * signal.
+   */
+  notifyOnDone?: boolean;
+  /**
+   * When true (the default), a matched error pattern for this agent while
+   * the user isn't actively watching the terminal will fire a system
+   * notification with the matched line. The red "!" badge on the sprite
+   * still shows regardless of this flag — it's the cheap in-app cue.
+   * Setting this to `false` silences only the OS banner, useful for
+   * tools that emit frequent benign "warnings" you don't want to be
+   * interrupted by.
+   */
+  notifyOnError?: boolean;
 }
 
 const STORAGE_KEY = 'virtualOffice_agents';
@@ -126,6 +146,12 @@ function normalizeAgent(raw: unknown): Agent | null {
     // Migrated agents default to `false` — users who created agents before
     // wandering existed shouldn't suddenly see them scatter on reload.
     autonomous: typeof r.autonomous === 'boolean' ? r.autonomous : false,
+    // Migrated agents default to `true` — the done notification is opt-out,
+    // matching how a fresh-install user would experience it.
+    notifyOnDone: typeof r.notifyOnDone === 'boolean' ? r.notifyOnDone : true,
+    // Same story for error notifications. The red "!" badge is already on
+    // by default; the OS notification rides along unless explicitly muted.
+    notifyOnError: typeof r.notifyOnError === 'boolean' ? r.notifyOnError : true,
   };
 }
 
@@ -148,6 +174,8 @@ export interface AddAgentInput {
   noConversationPattern?: string;
   busyPattern?: string;
   errorPattern?: string;
+  notifyOnDone?: boolean;
+  notifyOnError?: boolean;
 }
 
 export interface AgentCommandsInput {
@@ -156,6 +184,8 @@ export interface AgentCommandsInput {
   noConversationPattern?: string;
   busyPattern?: string;
   errorPattern?: string;
+  notifyOnDone?: boolean;
+  notifyOnError?: boolean;
 }
 
 export interface UseAgentsApi {
@@ -211,6 +241,12 @@ export function useAgents(): UseAgentsApi {
       // Newly created agents wander by default so the office feels alive
       // from the moment the user spawns someone in.
       autonomous: true,
+      // Default to notifying on done; the modal lets users opt out up
+      // front if they know they're creating a noisy (ping-pong) agent.
+      notifyOnDone: input.notifyOnDone ?? true,
+      // Errors default to notifying too — users almost always want to
+      // know when a long-running tool hits an error they missed.
+      notifyOnError: input.notifyOnError ?? true,
     };
     setAgents((prev) => [...prev, agent]);
     setActiveAgentId(agent.id);
@@ -235,6 +271,12 @@ export function useAgents(): UseAgentsApi {
             noConversationPattern: commands.noConversationPattern?.trim() || undefined,
             busyPattern: commands.busyPattern?.trim() || undefined,
             errorPattern: commands.errorPattern?.trim() || undefined,
+            notifyOnDone: commands.notifyOnDone !== undefined
+              ? commands.notifyOnDone
+              : (a.notifyOnDone ?? true),
+            notifyOnError: commands.notifyOnError !== undefined
+              ? commands.notifyOnError
+              : (a.notifyOnError ?? true),
           }
         : a
     )));

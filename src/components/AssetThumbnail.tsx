@@ -24,7 +24,7 @@ interface Props {
   size?: number;
 }
 
-export default function AssetThumbnail({ assetId, path, tileOverrides, size }: Props) {
+export default function AssetThumbnail({ assetId, path, tileOverrides }: Props) {
   const info = useMemo(() => {
     const overrideTiles = tileOverrides?.[assetId];
     if (overrideTiles && overrideTiles.length > 0) {

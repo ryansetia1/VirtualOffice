@@ -62,6 +62,12 @@ interface Props {
    *  Renders a red "!" badge at the top-right of the sprite; the message
    *  surfaces as a tooltip when that agent is hovered. */
   errorAgents?: Record<string, { message: string; at: number }>;
+  /** Agents that just finished a piece of work while the user wasn't
+   *  watching. Renders a green "✓" badge at the top-left of the sprite
+   *  with a pop-in animation so it's impossible to miss on return. Cleared
+   *  once the user opens that agent's terminal (acknowledgement) or a new
+   *  busy window begins. */
+  doneAgents?: Record<string, { at: number }>;
   onActivateAgent?: (id: string) => void;
   /** Fires when the user clicks empty space (or re-clicks the active agent)
    *  in live/read-only mode. Parent typically responds by clearing the
@@ -116,7 +122,6 @@ export default function GridCanvas({
   hoveredPlacementIds,
   readOnly,
   onAddPlacement,
-  onRemovePlacementAt,
   onRemovePlacementById,
   getPlacementAt,
   onBeginUndoBatch,
@@ -136,6 +141,7 @@ export default function GridCanvas({
   hoveredAgentId,
   busyAgentIds,
   errorAgents,
+  doneAgents,
   onActivateAgent,
   onDeactivateAgent,
   onOpenAgentTerminal,
@@ -166,10 +172,14 @@ export default function GridCanvas({
   const [busyTick, setBusyTick] = useState(0);
   const hasBusy = !!(busyAgentIds && Object.keys(busyAgentIds).length > 0);
   const hasError = !!(errorAgents && Object.keys(errorAgents).length > 0);
-  // RAF loop is shared between the thinking-bubble dots and the error-
-  // badge pulse. Runs as long as either overlay needs animating so we
-  // don't double-register.
-  const needsAnim = hasBusy || hasError;
+  const hasDone = !!(doneAgents && Object.keys(doneAgents).length > 0);
+  // RAF loop is shared between the thinking-bubble dots, the error-badge
+  // pulse, and the done-badge pop-in. Runs as long as any overlay still
+  // needs animating so we don't double-register. Once all done badges have
+  // finished their pop-in window the shared `busyTick` simply stops
+  // updating — the final frame is already painted and stays put until the
+  // parent clears `doneAgents`.
+  const needsAnim = hasBusy || hasError || hasDone;
   useEffect(() => {
     if (!needsAnim) return;
     let raf = 0;
@@ -820,6 +830,74 @@ export default function GridCanvas({
         ctx.fill();
         ctx.restore();
       }
+
+      // Done badge — green disk with a white checkmark pinned to the
+      // sprite's upper-LEFT corner so it can coexist with the error badge
+      // (upper-right) and the thinking bubble (above). Pops in over
+      // ~400ms using an ease-out-back curve (scale 0 → 1.15 → 1.0) so it
+      // nudges the eye without being distracting. After the pop-in
+      // window it stays stable until the parent clears `doneAgents`.
+      if (doneAgents && doneAgents[agent.id]) {
+        const POP_IN_MS = 400;
+        const entry = doneAgents[agent.id];
+        // `at` was recorded via Date.now() in App.tsx; keep this loop on
+        // the same clock so elapsed time is comparable regardless of
+        // render-time jitter.
+        const elapsed = Math.max(0, Date.now() - entry.at);
+        const t = Math.min(1, elapsed / POP_IN_MS);
+        // Scale curve: ease-out-back. Peaks at ~1.15 around t=0.6, then
+        // settles to 1.0. Mirrors typical iOS/material "pop" feel.
+        const scaleBump = (() => {
+          if (t >= 1) return 1;
+          const k = 1.70158;
+          const f = t - 1;
+          return 1 + (k + 1) * f * f * f + k * f * f; // easeOutBack
+        })();
+        const badgeScale = Math.max(0.7, Math.min(1.3, cellPx / TILE_PX));
+        const baseR = 8 * badgeScale;
+        const badgeCx = destX + baseR * 0.6;
+        const badgeCy = destY + baseR * 0.8;
+        const r = baseR * scaleBump;
+
+        ctx.save();
+        // Soft glow, same trick as the error badge — two translucent
+        // disks stacked so we avoid a per-frame radial gradient.
+        ctx.fillStyle = 'rgba(76, 175, 80, 0.22)';
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy, r * 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(76, 175, 80, 0.35)';
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy, r * 1.4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Badge body
+        ctx.fillStyle = '#4caf50';
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(badgeCx, badgeCy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // White checkmark glyph — drawn as two line segments meeting at
+        // a lower-left pivot. Sized so it stays legible across zoom
+        // levels.
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(1.5, r * 0.26);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        const checkReach = r * 0.6;
+        // Pivot slightly below-center for an asymmetric check shape.
+        const pivotX = badgeCx - r * 0.1;
+        const pivotY = badgeCy + r * 0.22;
+        ctx.beginPath();
+        ctx.moveTo(pivotX - checkReach * 0.75, pivotY - checkReach * 0.1);
+        ctx.lineTo(pivotX, pivotY);
+        ctx.lineTo(pivotX + checkReach * 0.95, pivotY - checkReach * 0.85);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Error tooltip — renders the stored error message above the hovered
@@ -1175,7 +1253,7 @@ export default function GridCanvas({
 
     ctx.restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, busyAgentIds, errorAgents, busyTick, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
+  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, busyAgentIds, errorAgents, doneAgents, busyTick, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
 
   // ── Camera follow active agent (read-only mode only) ─────────────────────
   // The camera target is *derived* from agent position (see `effectiveOffset`

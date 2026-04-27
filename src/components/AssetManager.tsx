@@ -56,7 +56,6 @@ export default function AssetManager({
   onUncategorizeAssets,
   getAssetDisplayName,
   onRenameAsset,
-  onClearAssetName,
   onBatchRename,
   onSetTileOverride,
   onClearTileOverride,
@@ -101,18 +100,11 @@ export default function AssetManager({
   const [replaceValue, setReplaceValue] = useState('');
 
   const allAssets = useMemo(() => [...getAllAssets(), ...customAssetInfos], [customAssetInfos]);
-  const allAssetMap = useMemo(() => {
-    const m = new Map<number, AssetInfo>();
-    for (const a of allAssets) m.set(a.id, a);
-    return m;
-  }, [allAssets]);
   const customAssetMap = useMemo(() => {
     const m = new Map<number, CustomAssetData>();
     for (const a of customAssets) m.set(a.id, a);
     return m;
   }, [customAssets]);
-
-  const uncatSet = useMemo(() => new Set(uncategorizedIds), [uncategorizedIds]);
 
   // Build a flat lookup: assetId -> categoryPath
   const assetCategoryMap = useMemo(() => {

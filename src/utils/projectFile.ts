@@ -3,6 +3,9 @@
  * Keys bundled: room, asset library, tile overrides, custom assets.
  */
 
+import { save, open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
+
 const KEYS = [
   'virtualOffice_room',
   'virtualOffice_library',
@@ -43,7 +46,7 @@ interface ProjectFile {
   data: Record<string, unknown>;
 }
 
-export function exportProject(): void {
+function buildProjectPayload(): string {
   const data: Record<string, unknown> = {};
   for (const key of KEYS) {
     const raw = localStorage.getItem(key);
@@ -51,46 +54,67 @@ export function exportProject(): void {
       try { data[key] = JSON.parse(raw); } catch { data[key] = raw; }
     }
   }
-
   const file: ProjectFile = {
     _header: FILE_HEADER,
     _version: FILE_VERSION,
     _exportedAt: new Date().toISOString(),
     data,
   };
-
-  const blob = new Blob([JSON.stringify(file)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `virtual-office-${new Date().toISOString().slice(0, 10)}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  return JSON.stringify(file, null, 2);
 }
 
-export function importProject(file: File): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string) as ProjectFile;
-        if (parsed._header !== FILE_HEADER) {
-          reject(new Error('Not a valid Virtual Office project file.'));
-          return;
-        }
-        for (const key of KEYS) {
-          if (key in parsed.data) {
-            localStorage.setItem(key, JSON.stringify(parsed.data[key]));
-          }
-        }
-        resolve();
-      } catch {
-        reject(new Error('Failed to parse project file.'));
-      }
-    };
-    reader.onerror = () => reject(new Error('Failed to read file.'));
-    reader.readAsText(file);
+function applyProjectPayload(parsed: ProjectFile): void {
+  if (parsed._header !== FILE_HEADER) {
+    throw new Error('Not a valid Virtual Office project file.');
+  }
+  for (const key of KEYS) {
+    if (key in parsed.data) {
+      localStorage.setItem(key, JSON.stringify(parsed.data[key]));
+    }
+  }
+}
+
+/**
+ * Show a native save dialog and write the project JSON to the chosen path.
+ * Returns the saved path, or `null` if the user cancelled.
+ */
+export async function exportProject(): Promise<string | null> {
+  const defaultName = `virtual-office-${new Date().toISOString().slice(0, 10)}.json`;
+
+  const path = await save({
+    title: 'Export Virtual Office project',
+    defaultPath: defaultName,
+    filters: [{ name: 'Virtual Office project', extensions: ['json'] }],
   });
+
+  if (!path) return null;
+
+  const contents = buildProjectPayload();
+  await invoke('write_text_file', { path, contents });
+  return path;
+}
+
+/**
+ * Show a native open dialog and load a project JSON from the chosen path.
+ * Returns the loaded path, or `null` if the user cancelled.
+ */
+export async function importProject(): Promise<string | null> {
+  const selected = await open({
+    title: 'Import Virtual Office project',
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'Virtual Office project', extensions: ['json'] }],
+  });
+
+  if (!selected || Array.isArray(selected)) return null;
+
+  const raw = await invoke<string>('read_text_file', { path: selected });
+  let parsed: ProjectFile;
+  try {
+    parsed = JSON.parse(raw) as ProjectFile;
+  } catch {
+    throw new Error('Failed to parse project file.');
+  }
+  applyProjectPayload(parsed);
+  return selected;
 }

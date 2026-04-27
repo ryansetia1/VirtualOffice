@@ -229,8 +229,15 @@ interface TerminalViewProps {
    * has been quiet for at least BUSY_IDLE_TIMEOUT_MS (and the minimum-
    * visible window has elapsed). The parent uses this to paint a thinking
    * bubble over the agent sprite.
+   *
+   * `busyDurationMs` reports how long the agent was busy immediately before
+   * this event. On the rising edge (`busy === true`) it is always `0`. On
+   * the falling edge it is the wall-clock time between the last `true` and
+   * this `false`, computed from `performance.now()`. Parents use this to
+   * distinguish a tiny sub-step from a meaningful piece of work (e.g. only
+   * notify the user if the agent was busy for several seconds).
    */
-  onBusyChange?: (busy: boolean) => void;
+  onBusyChange?: (busy: boolean, busyDurationMs: number) => void;
   /**
    * Fires when the error-pattern watcher matches a line of PTY output.
    * Payload is the trimmed matching line (truncated to a sane length for
@@ -353,7 +360,7 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
       const sinceShown = now - busyShownAtRef.current;
       if (sinceMatch >= BUSY_IDLE_TIMEOUT_MS && sinceShown >= BUSY_MIN_VISIBLE_MS) {
         busyRef.current = false;
-        onBusyChangeRef.current?.(false);
+        onBusyChangeRef.current?.(false, now - busyShownAtRef.current);
       }
     }, 250);
 
@@ -541,7 +548,7 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
                 if (!busyRef.current) {
                   busyRef.current = true;
                   busyShownAtRef.current = now;
-                  onBusyChangeRef.current?.(true);
+                  onBusyChangeRef.current?.(true, 0);
                 }
               }
               // Keep only the tail of the *decoded* (not stripped) stream;
@@ -587,7 +594,7 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
             // thinking bubble immediately regardless of the idle window.
             if (busyRef.current) {
               busyRef.current = false;
-              onBusyChangeRef.current?.(false);
+              onBusyChangeRef.current?.(false, performance.now() - busyShownAtRef.current);
             }
             // Surface the exit to the parent so the conversation flag can be
             // promoted to "has previous". Parent suppresses this when the
@@ -637,7 +644,7 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
       // while still reporting busy (user closes terminal mid-think).
       if (busyRef.current) {
         busyRef.current = false;
-        onBusyChangeRef.current?.(false);
+        onBusyChangeRef.current?.(false, performance.now() - busyShownAtRef.current);
       }
       div.remove();
     };

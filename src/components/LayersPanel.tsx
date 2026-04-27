@@ -53,10 +53,6 @@ interface Props {
   onToggleCollapsed: () => void;
 }
 
-type FlatItem =
-  | { kind: 'layer-header'; layer: LayerType }
-  | { kind: 'group-header'; group: PlacementGroup; layer: LayerType }
-  | { kind: 'placement'; placement: Placement; layer: LayerType; groupId?: string };
 
 export default function LayersPanel({
   room,
@@ -794,7 +790,7 @@ export default function LayersPanel({
     setPanelWidth(newWidth);
   }, [isResizing]);
 
-  const handleResizeEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+  const handleResizeEnd = useCallback((_e: React.PointerEvent<HTMLDivElement>) => {
     setIsResizing(false);
     resizeStartRef.current = null;
     document.body.style.cursor = '';
