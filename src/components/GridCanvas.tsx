@@ -86,6 +86,11 @@ interface Props {
    *    - `'below'` — force-render before any agent.
    *  When omitted, every placement is treated as `'auto'`. */
   getRenderOrder?: (placement: Placement) => 'auto' | 'above' | 'below';
+  /** Returns the effective y-sort anchor for a placement (in cells from the
+   *  top row of the bbox). When omitted, every placement falls back to its
+   *  `spanH`, preserving the historical "sort by bbox bottom" behaviour. See
+   *  `useSortAnchorOverrides` for the resolution logic. */
+  getSortAnchor?: (placement: Placement) => number;
   showNameplates?: boolean;
   /** When true (and `readOnly`), overlays a red tint on every pixel that
    *  currently blocks agent movement. Useful to diagnose "invisible walls"
@@ -149,6 +154,7 @@ export default function GridCanvas({
   onAgentHover,
   onPlacementContextMenu,
   getRenderOrder,
+  getSortAnchor,
   showNameplates = true,
   collisionDebug = false,
   getPlacementCollisionMask,
@@ -532,7 +538,12 @@ export default function GridCanvas({
       const p = sortedStreamPlacements[i];
       const order = getRenderOrder?.(p) ?? 'auto';
       const bucket: 0 | 1 | 2 = order === 'below' ? 0 : order === 'above' ? 2 : 1;
-      const natural = (p.row + p.spanH) * 1000;
+      // Sort by the bbox's bottom edge unless the user has pinned a custom
+      // anchor (Plan B: per-asset sort anchor). Anchor > spanH pushes the
+      // sort line deeper (asset occludes more); anchor < spanH pulls it up
+      // (asset gets occluded more readily).
+      const anchor = getSortAnchor?.(p) ?? p.spanH;
+      const natural = (p.row + anchor) * 1000;
       stream.push({ kind: 'placement', bucket, sortY: natural, stableIdx: i, data: p });
     }
     // Agents live in the auto bucket — their sort key is the foot row so
@@ -1253,7 +1264,7 @@ export default function GridCanvas({
 
     ctx.restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, busyAgentIds, errorAgents, doneAgents, busyTick, showNameplates, getRenderOrder, collisionDebug, getPlacementCollisionMask]);
+  }, [room, version, effectiveOffset, zoom, hoverCell, toolState, dragAssetId, cellPx, movingPlacement, marqueeStart, isPanning, drawAsset, getPlacementAt, tileOverrides, resolveSize, resolveTileInfo, customAssets, selectedPlacementIds, hoveredPlacementIds, readOnly, selectMarquee, selectDragRenderKey, agents, activeAgentId, hoveredAgentId, busyAgentIds, errorAgents, doneAgents, busyTick, showNameplates, getRenderOrder, getSortAnchor, collisionDebug, getPlacementCollisionMask]);
 
   // ── Camera follow active agent (read-only mode only) ─────────────────────
   // The camera target is *derived* from agent position (see `effectiveOffset`

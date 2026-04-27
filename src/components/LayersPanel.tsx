@@ -1,6 +1,8 @@
 import { useState, useCallback, useMemo, useRef, type PointerEvent as RPointerEvent } from 'react';
 import type { RoomState, Placement, LayerType, PlacementGroup } from '../hooks/useGrid';
+import type { SortAnchorApi } from '../hooks/useSortAnchorOverrides';
 import ContextMenu, { type MenuItem } from './ContextMenu';
+import { buildSortAnchorMenuItems } from '../utils/sortAnchorMenu';
 
 const LAYER_ORDER_REVERSED: LayerType[] = ['object', 'wall', 'floor'];
 
@@ -46,9 +48,19 @@ interface Props {
     setAssetOrder: (assetId: number, order: 'auto' | 'above' | 'below') => void;
     clearPlacementOverride: (placementId: string) => void;
   };
+  /** Sort-anchor API (parallel to `renderOrderApi`). Read-only here — the
+   *  numeric editor lives in `App` so we can reuse its dialog. The panel
+   *  only needs the four methods `buildSortAnchorMenuItems` consumes
+   *  (effective/default labels + "reset" shortcut). */
+  sortAnchorApi?: Pick<SortAnchorApi,
+    'getAnchor' | 'getAssetAnchor' | 'hasPlacementOverride' | 'clearPlacementOverride'>;
+  /** Called when the user picks "Sort anchor..." in the panel's context
+   *  menu. `App` owns the actual dialog state + resolves spanH, so we just
+   *  forward the target and scope. */
+  onOpenSortAnchorDialog?: (placementId: string, scope: 'placement' | 'asset') => void;
   /** Resolves a placement id → placement. Used by the Layers panel context
-   *  menu to look up asset ids for asset-scoped actions. */
-  getPlacementById?: (id: string) => { id: string; assetId: number } | undefined;
+   *  menu to look up asset ids + bbox info for asset-scoped actions. */
+  getPlacementById?: (id: string) => { id: string; assetId: number; spanH: number } | undefined;
   onModeChange?: (mode: 'select' | 'draw' | 'place') => void;
   onToggleCollapsed: () => void;
 }
@@ -86,6 +98,8 @@ export default function LayersPanel({
   onRemovePlacementsFromGroup,
   onEditCollision,
   renderOrderApi,
+  sortAnchorApi,
+  onOpenSortAnchorDialog,
   getPlacementById,
   onModeChange,
   onToggleCollapsed,
@@ -327,6 +341,15 @@ export default function LayersPanel({
           });
         }
       }
+      if (sortAnchorApi && singlePlacement && onOpenSortAnchorDialog) {
+        for (const item of buildSortAnchorMenuItems(
+          singlePlacement,
+          sortAnchorApi,
+          (p, scope) => onOpenSortAnchorDialog(p.id, scope),
+        )) {
+          items.push(item);
+        }
+      }
       items.push({ label: 'Bring to Front', onClick: () => onBringToFront(singleId) });
       items.push({ label: 'Send to Back', onClick: () => onSendToBack(singleId) });
     }
@@ -344,7 +367,7 @@ export default function LayersPanel({
     }
     items.push({ label: 'Delete', danger: true, onClick: () => onDeletePlacements(targetIds) });
     setCtxMenu({ x: e.clientX, y: e.clientY, items });
-  }, [selectedIds, room.layerNames, onEditCollision, renderOrderApi, getPlacementById, onBringToFront, onSendToBack, onMovePlacementsToLayer, onCreateGroup, onDeletePlacements]);
+  }, [selectedIds, room.layerNames, onEditCollision, renderOrderApi, sortAnchorApi, onOpenSortAnchorDialog, getPlacementById, onBringToFront, onSendToBack, onMovePlacementsToLayer, onCreateGroup, onDeletePlacements]);
 
   const openGroupCtx = useCallback((e: React.MouseEvent, groupId: string) => {
     e.preventDefault();

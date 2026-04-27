@@ -29,6 +29,12 @@ const KEYS = [
   // level is a per-instance override that wins over the asset default.
   'virtualOffice_assetRenderOrder',
   'virtualOffice_placementRenderOrder',
+  // Per-asset / per-placement y-sort anchor overrides (Plan B). Shifts where
+  // an asset sits on the y-sort line — used e.g. to tune tall assets like
+  // chairs or back walls that otherwise occlude agents one row past their
+  // visual foot. See `useSortAnchorOverrides` for semantics.
+  'virtualOffice_assetSortAnchor',
+  'virtualOffice_placementSortAnchor',
   // Legacy above-agent flag keys — kept here so old project files still
   // round-trip cleanly. `useRenderOrderOverrides` migrates these into the
   // new storage on first load and removes them.

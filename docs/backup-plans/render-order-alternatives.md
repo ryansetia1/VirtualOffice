@@ -114,45 +114,55 @@ and `useRenderOrderOverrides.ts`.
 
 ---
 
-## Backup plan B — Per-asset sort anchor
+## Plan B — Per-asset sort anchor (implemented 2026-04-27)
 
-**Trigger:** users want finer control than three buckets but not the full
-pixel-priority machinery (plan D). Especially relevant for tall assets
-(lamps, pillars, mannequins) where the asset's visual "foot" is not at the
-bottom of its bounding box.
+> **Status:** shipped. See [../../src/hooks/useSortAnchorOverrides.ts](../../src/hooks/useSortAnchorOverrides.ts)
+> and the `getSortAnchor` prop on `GridCanvas`. UI lives in the placement
+> right-click menus (both the canvas and the Layers panel) under
+> "Sort anchor: this object…" / "Sort anchor: all of this type…", which
+> opens [../../src/components/SortAnchorDialog.tsx](../../src/components/SortAnchorDialog.tsx).
 
-**Idea:** add an optional `sortAnchor` to assets and/or placements.
+**Original trigger:** users want finer control than three buckets but not
+the full pixel-priority machinery (plan D). Especially relevant for tall
+assets (lamps, pillars, mannequins, chairs with tall backrests) where the
+asset's visual "foot" is not at the bottom of its bounding box.
+
+**Shipped behaviour:** a numeric `sortAnchor`, resolved per-placement →
+per-asset → fallback `spanH`. Stored in `localStorage` under
+`virtualOffice_assetSortAnchor` and `virtualOffice_placementSortAnchor`,
+and round-tripped through project export/import. Fractional values (e.g.
+`0.5`) are accepted.
+
+Sort key in the unified stream becomes:
 
 ```ts
-// Offset from the top row of the placement's bbox, in cells.
-// Default = spanH   (current behavior: foot at bbox bottom).
-// spanH - 1 = bottom row anchor, 0 = top row anchor.
-sortAnchor?: number;
+const anchor = getSortAnchor?.(p) ?? p.spanH;
+const natural = (p.row + anchor) * 1000;
 ```
 
-Sort key becomes `(row + sortAnchor) * 1000` instead of
-`(row + spanH) * 1000`.
+Anchor semantics (relative to the bbox bottom = `spanH`):
+- `anchor === spanH`  — default, no change.
+- `anchor > spanH`    — asset sorts deeper (draws later, occludes more).
+- `anchor < spanH`    — asset sorts shallower (draws earlier, gets
+                        occluded more readily).
 
-**Pros**
-- Covers the luggage case without any bucket override — anchor at the top
-  of the bbox means any agent whose foot is at or below that row draws in
-  front.
-- Covers "tall back wall" cases too: shove the anchor up so the wall
-  effectively sorts at its top row.
-- Fractional anchors (e.g. `0.5`) are trivial and give sub-row control.
+### When to reach for it
 
-**Cons**
-- More UI — a numeric field in the Collision Editor or Asset Manager.
-- User has to understand what the anchor means.
-- Doesn't handle hybrid per-pixel cases (L3).
+- A chair / desk combo keeps covering the agent one row south of the
+  seat → bump the asset anchor to `spanH + 1` so the agent pops in front
+  as soon as its foot crosses the seat row.
+- Tall back wall whose pixels extend below its bbox → same as above.
+- Floor art parked on the object layer → anchor to `1` (top row) so it
+  behaves like a floor decal.
 
-**Where it lives**
-- Data: add to `Placement` (`useGrid.ts`) and to a new per-asset map (
-  parallel to `useRenderOrderOverrides`).
-- Resolution helper next to `getRenderOrder`.
-- UI surface: Collision Editor or a small panel in Asset Manager.
+### Relationship to the 3-bucket render-order override
 
-**Estimated effort:** medium — ~100–200 lines including UI.
+Use the render-order override (`Always behind` / `Always in front`) when
+you want to **ignore** y-sort entirely for this item — e.g. an overhead
+sign that must always cover everything, or a rug that must always sit
+beneath everything. Use the sort anchor when you still want y-sort to
+win in the normal case, but the bbox's bottom edge isn't the right
+geometry to sort against.
 
 ---
 

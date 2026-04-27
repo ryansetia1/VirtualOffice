@@ -7,6 +7,8 @@ import { useAgents } from './hooks/useAgents';
 import { useWanderLoop } from './hooks/useWanderLoop';
 import { useCollisionMasks } from './hooks/useCollisionMasks';
 import { useRenderOrderOverrides, type RenderOrder } from './hooks/useRenderOrderOverrides';
+import { useSortAnchorOverrides } from './hooks/useSortAnchorOverrides';
+import { buildSortAnchorMenuItems } from './utils/sortAnchorMenu';
 import { preloadAllAssets } from './utils/imageLoader';
 import {
   preloadAllCharacters,
@@ -34,6 +36,7 @@ import LiveHeader from './components/LiveHeader';
 import AddAgentModal from './components/AddAgentModal';
 import ContextMenu, { type MenuItem } from './components/ContextMenu';
 import CollisionEditor from './components/CollisionEditor';
+import SortAnchorDialog from './components/SortAnchorDialog';
 import TerminalPanel, { FloatingTerminalWindow, TerminalView } from './components/TerminalPanel';
 import { getAssetTileInfo } from './data/assetManifest';
 import { getAutoMask } from './utils/pixelMasks';
@@ -100,6 +103,15 @@ export default function App() {
     notifyOnDone: boolean;
     notifyOnError: boolean;
   } | null>(null);
+  // Per-placement / per-asset y-sort anchor editor. `placementId` is only
+  // present in `placement` scope; `asset` scope edits the default for every
+  // placement of the asset. `currentEffective` is captured on open and
+  // shown in the dialog for reference.
+  const [sortAnchorDialog, setSortAnchorDialog] = useState<
+    | { scope: 'placement'; placementId: string; assetId: number; spanH: number; currentEffective: number; hasOverride: boolean }
+    | { scope: 'asset'; assetId: number; spanH: number; currentEffective: number; hasOverride: boolean }
+    | null
+  >(null);
   // Agent hovered in the live grid. Used both for the visual glow and for
   // suspending the wander loop while the pointer is over the sprite so the
   // user can line up a click / double-click / context-menu without chasing
@@ -426,6 +438,7 @@ export default function App() {
   agentsApiLiveRef.current = agentsApi;
   const collisionApi = useCollisionMasks();
   const renderOrderApi = useRenderOrderOverrides();
+  const sortAnchorApi = useSortAnchorOverrides();
   const { customAssets, customAssetInfos, addCustomAssets, removeCustomAsset } = useCustomAssets();
   const customAssetIds = customAssets.map((a) => a.id);
   const {
@@ -528,11 +541,38 @@ export default function App() {
   // ungroup, etc.) we drop its saved entries so storage doesn't leak.
   const prunePlacementMasks = collisionApi.prunePlacements;
   const prunePlacementOrder = renderOrderApi.prunePlacements;
+  const prunePlacementAnchors = sortAnchorApi.prunePlacements;
   useEffect(() => {
     const valid = new Set(room.placements.map((p) => p.id));
     prunePlacementMasks(valid);
     prunePlacementOrder(valid);
-  }, [room.placements, prunePlacementMasks, prunePlacementOrder]);
+    prunePlacementAnchors(valid);
+  }, [room.placements, prunePlacementMasks, prunePlacementOrder, prunePlacementAnchors]);
+
+  // Opens the sort-anchor dialog for a given placement/scope. Shared
+  // between the workspace right-click menu and the Layers panel so both
+  // entry points resolve effective/default values the same way.
+  const openSortAnchor = useCallback((placement: Placement, scope: 'placement' | 'asset') => {
+    if (scope === 'placement') {
+      setSortAnchorDialog({
+        scope: 'placement',
+        placementId: placement.id,
+        assetId: placement.assetId,
+        spanH: placement.spanH,
+        currentEffective: sortAnchorApi.getAnchor(placement, placement.spanH),
+        hasOverride: sortAnchorApi.hasPlacementOverride(placement.id),
+      });
+    } else {
+      const assetAnchor = sortAnchorApi.getAssetAnchor(placement.assetId);
+      setSortAnchorDialog({
+        scope: 'asset',
+        assetId: placement.assetId,
+        spanH: placement.spanH,
+        currentEffective: assetAnchor ?? placement.spanH,
+        hasOverride: assetAnchor !== null,
+      });
+    }
+  }, [sortAnchorApi]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -835,6 +875,7 @@ export default function App() {
                 });
               }}
               getRenderOrder={renderOrderApi.getOrder}
+              getSortAnchor={(p) => sortAnchorApi.getAnchor(p, p.spanH)}
               collisionDebug={collisionDebug}
               getPlacementCollisionMask={collisionApi.getEffectiveMaskFor}
             />
@@ -913,6 +954,16 @@ export default function App() {
                 setAssetOrder: renderOrderApi.setAssetOrder,
                 clearPlacementOverride: renderOrderApi.clearPlacementOverride,
               }}
+              sortAnchorApi={{
+                getAnchor: sortAnchorApi.getAnchor,
+                getAssetAnchor: sortAnchorApi.getAssetAnchor,
+                hasPlacementOverride: sortAnchorApi.hasPlacementOverride,
+                clearPlacementOverride: sortAnchorApi.clearPlacementOverride,
+              }}
+              onOpenSortAnchorDialog={(placementId, scope) => {
+                const p = room.placements.find((pp) => pp.id === placementId);
+                if (p) openSortAnchor(p, scope);
+              }}
               getPlacementById={(id) => room.placements.find((p) => p.id === id)}
               onModeChange={setMode}
               onToggleCollapsed={() => setLayersPanelCollapsed((v) => !v)}
@@ -943,6 +994,7 @@ export default function App() {
               onFlipH={flipHAsset}
               onFlipV={flipVAsset}
               getRenderOrder={renderOrderApi.getOrder}
+              getSortAnchor={(p) => sortAnchorApi.getAnchor(p, p.spanH)}
               onPlacementContextMenu={(placement, x, y) => {
                 // If the right-clicked placement is part of the current
                 // selection, act on the whole selection. Otherwise, select
@@ -1174,6 +1226,12 @@ export default function App() {
               onClick: () => renderOrderApi.setAssetOrder(placement.assetId, value),
             });
           }
+          // Sort anchor — tune the y-sort line for tall assets whose
+          // visual foot isn't at the bbox bottom. Inline labels show the
+          // effective values so the menu doubles as a quick diagnostic.
+          for (const item of buildSortAnchorMenuItems(placement, sortAnchorApi, openSortAnchor)) {
+            items.push(item);
+          }
         }
         if (ids.size > 1) {
           items.push({
@@ -1400,6 +1458,50 @@ export default function App() {
               </div>
             </div>
           </div>
+        );
+      })()}
+
+      {sortAnchorDialog && (() => {
+        const d = sortAnchorDialog;
+        const assetName = getAssetDisplayName(d.assetId) ?? `#${d.assetId}`;
+        // Forced render order (`above` / `below`) wins over sortY in the
+        // unified stream, so the dialog surfaces it as a warning. In
+        // placement scope we check the resolved order for this specific
+        // placement; in asset scope we check the asset-level default.
+        const currentRenderOrder = d.scope === 'placement'
+          ? renderOrderApi.getOrder({ id: d.placementId, assetId: d.assetId })
+          : renderOrderApi.getAssetOrder(d.assetId);
+        const scope: React.ComponentProps<typeof SortAnchorDialog>['scope'] =
+          d.scope === 'placement'
+            ? { kind: 'placement', placementId: d.placementId, assetId: d.assetId, assetName,
+                spanH: d.spanH, currentEffective: d.currentEffective, hasOverride: d.hasOverride }
+            : { kind: 'asset', assetId: d.assetId, assetName,
+                spanH: d.spanH, currentEffective: d.currentEffective, hasOverride: d.hasOverride };
+        return (
+          <SortAnchorDialog
+            scope={scope}
+            currentRenderOrder={currentRenderOrder}
+            onClearRenderOrder={() => {
+              // Scope the clear to match the dialog scope so users don't
+              // get surprise side-effects on unrelated placements/assets.
+              // For placement scope we also clear the asset default —
+              // otherwise the placement inherits the very conflict we're
+              // trying to eliminate and the warning reappears on reopen.
+              if (d.scope === 'placement') {
+                renderOrderApi.clearPlacementOverride(d.placementId);
+              }
+              renderOrderApi.setAssetOrder(d.assetId, 'auto');
+            }}
+            onSave={(anchor) => {
+              if (d.scope === 'placement') {
+                sortAnchorApi.setPlacementAnchor(d.placementId, anchor);
+              } else {
+                sortAnchorApi.setAssetAnchor(d.assetId, anchor);
+              }
+              setSortAnchorDialog(null);
+            }}
+            onCancel={() => setSortAnchorDialog(null)}
+          />
         );
       })()}
 
