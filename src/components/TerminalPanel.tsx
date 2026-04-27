@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import type { Agent } from '../hooks/useAgents';
 import { agentFolderPath } from '../utils/agentFolders';
+import { registerDropZone, type DropZoneHandle } from '../utils/webviewDropRouter';
 import {
   ptySpawn,
   ptyWriteString,
@@ -12,6 +13,63 @@ import {
   ptyResize,
   ptyKill,
 } from '../utils/pty';
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Drag-and-drop → PTY attachment helpers
+//
+// CSI 200 ~ … CSI 201 ~ is the xterm "bracketed paste" envelope. Modern TUI
+// CLIs (Claude Code, Gemini CLI, Aider, etc.) enable bracketed paste on
+// startup (DECSET 2004) and use it to distinguish pasted content from typed
+// keystrokes — including triggering their image-attachment detectors that
+// turn a pasted image path into an `[Image #N]` placeholder and forward the
+// file to the model as multimodal content.
+//
+// `typePathsAsPastedAttachments` streams each path as its own paste block
+// with a small inter-path delay. Two details matter:
+//
+//   1. One paste per path. Lumping multiple paths into a single block defeats
+//      the single-path heuristic most CLIs use ("is this paste's content a
+//      valid image path?") and causes the CLI to fall back to treating the
+//      block as prose.
+//   2. ~40 ms gap between writes. Back-to-back pastes in a single PTY send
+//      race Ink/React-based TUI frameworks: paste #1 is still mid-render
+//      when #2 arrives, so they coalesce or drop #1. A couple of render
+//      frames of breathing room gets us `[Image #1] [Image #2] …` reliably.
+//
+// Paths are single-quote shell-escaped so spaces/special chars survive; every
+// CLI tested also accepts the quotes transparently as part of the path token.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const PASTE_START = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
+const INTER_PASTE_DELAY_MS = 40;
+
+function shellQuotePath(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
+async function typePathsAsPastedAttachments(
+  sessionId: string,
+  paths: readonly string[],
+  isCancelled: () => boolean,
+): Promise<void> {
+  for (let i = 0; i < paths.length; i++) {
+    if (isCancelled()) return;
+    const separator = i === 0 ? '' : ' ';
+    const block = `${PASTE_START}${shellQuotePath(paths[i])}${PASTE_END}`;
+    try {
+      await ptyWriteString(sessionId, separator + block);
+    } catch (e) {
+      console.warn('[terminal] paste write failed', e);
+      return;
+    }
+    if (i < paths.length - 1) {
+      await new Promise<void>((resolve) =>
+        window.setTimeout(resolve, INTER_PASTE_DELAY_MS),
+      );
+    }
+  }
+}
 
 export interface OpenTerminal {
   id: string;
@@ -194,6 +252,9 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>('booting…');
+  // Drives the "Drop to attach" overlay while an OS-level drag hovers the
+  // host div. Flipped by the shared webviewDropRouter.
+  const [dropOver, setDropOver] = useState(false);
 
   // ── Auto-run command state machine ────────────────────────────────────────
   //
@@ -264,7 +325,22 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
       closeChannel: (() => void) | null;
       ro: ResizeObserver | null;
       busyTimer: number | null;
-    } = { disposed: false, term: null, closeChannel: null, ro: null, busyTimer: null };
+      dropZone: DropZoneHandle | null;
+    } = { disposed: false, term: null, closeChannel: null, ro: null, busyTimer: null, dropZone: null };
+
+    // Hook this host div into the shared drag-drop router. File drops land
+    // on the PTY as bracketed-paste blocks (see `typePathsAsPastedAttachments`
+    // for the protocol details). No-op in the browser build.
+    state.dropZone = registerDropZone(sessionId, div, {
+      onHoverChange: (inside) => {
+        if (!state.disposed) setDropOver(inside);
+      },
+      onDrop: (paths) => {
+        if (state.disposed || paths.length === 0) return;
+        void typePathsAsPastedAttachments(sessionId, paths, () => state.disposed);
+        termRef.current?.focus();
+      },
+    });
 
     // Idle-check tick. Runs at 250ms regardless of PTY activity so we can
     // declare "idle" without needing another chunk to wake us up. Cheap —
@@ -549,6 +625,7 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
 
     return () => {
       state.disposed = true;
+      state.dropZone?.dispose();
       if (state.ro) state.ro.disconnect();
       if (state.busyTimer != null) window.clearInterval(state.busyTimer);
       if (state.closeChannel) state.closeChannel();
@@ -598,6 +675,14 @@ export function TerminalView({ agent, target, active, onAutoClose, onSessionEnde
     <>
       {statusMsg && !errorMsg && <div style={styles.statusBanner}>{statusMsg}</div>}
       {errorMsg && <div style={styles.errorBanner}>{errorMsg}</div>}
+      {dropOver && (
+        <div style={styles.dropOverlay}>
+          <div style={styles.dropOverlayInner}>
+            <PaperclipIcon />
+            <span>Drop files to attach</span>
+          </div>
+        </div>
+      )}
     </>,
     hostDiv
   );
@@ -854,6 +939,21 @@ function DockIcon() {
   );
 }
 
+function PaperclipIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" style={{ display: 'block' }}>
+      <path
+        d="M10.5 3.5L5 9a2 2 0 1 0 2.83 2.83l6-6a3.5 3.5 0 1 0-4.95-4.95l-6 6a5 5 0 0 0 7.07 7.07L14.5 9"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
 function ResetIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 14 14" fill="none" style={{ display: 'block' }}>
@@ -935,5 +1035,23 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '6px 10px', background: 'rgba(239, 83, 80, 0.2)',
     border: '1px solid rgba(239, 83, 80, 0.5)', color: '#ef5350',
     borderRadius: 4, fontSize: 12,
+  },
+  dropOverlay: {
+    position: 'absolute', inset: 6,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'rgba(79, 195, 247, 0.12)',
+    border: '2px dashed rgba(79, 195, 247, 0.7)',
+    borderRadius: 6,
+    pointerEvents: 'none',
+    zIndex: 5,
+  },
+  dropOverlayInner: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '8px 14px',
+    background: 'rgba(13, 17, 23, 0.85)',
+    border: '1px solid rgba(79, 195, 247, 0.6)',
+    borderRadius: 6,
+    color: '#90caf9', fontSize: 13, fontWeight: 500,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
   },
 };

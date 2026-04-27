@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 // KONFIGURASI
 // ============================================
 const HTML_FILE = path.join(__dirname, 'index.html');
-const UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 menit
+const UPDATE_INTERVAL_MS = 60 * 60 * 1000; // 1 jam
 
 // Sumber berita prioritas
 const NEWS_SOURCES = [
